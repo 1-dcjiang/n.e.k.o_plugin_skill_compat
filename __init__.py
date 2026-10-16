@@ -13,9 +13,16 @@ import re
 import threading
 
 from plugin.sdk.plugin import (
-    NekoPluginBase, neko_plugin, lifecycle, ui, Ok, Err, SdkError, plugin_entry,
+    Err,
+    NekoPluginBase,
+    Ok,
+    SdkError,
+    lifecycle,
+    llm_tool,
+    neko_plugin,
+    plugin_entry,
+    ui,
 )
-from plugin.sdk.plugin import llm_tool
 
 # ---------- skill 格式兼容（复用 skill_compat 逻辑） ----------
 VALID_DIRNAME = re.compile(r'^[a-z0-9][a-z0-9-]*$')
