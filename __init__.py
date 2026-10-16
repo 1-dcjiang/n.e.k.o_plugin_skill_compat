@@ -13,7 +13,7 @@ import re
 import threading
 
 from plugin.sdk.plugin import (
-    NekoPluginBase, neko_plugin, lifecycle, ui, Ok, Err, SdkError,
+    NekoPluginBase, neko_plugin, lifecycle, ui, Ok, Err, SdkError, plugin_entry,
 )
 from plugin.sdk.plugin import llm_tool
 
@@ -261,10 +261,12 @@ class SkillCompatPlugin(NekoPluginBase):
     # ══════════ UI（展示已加载 skill） ══════════
 
     @ui.action(id="refresh_skills", label="重新扫描 Skill")
+    @plugin_entry(id="refresh_skills", kind="action")
     async def refresh_skills(self, **_):
         await self._scan_all()
         return Ok({"status": self._scan_status})
 
     @ui.action(id="get_skill_list", label="获取 Skill 列表")
+    @plugin_entry(id="get_skill_list", kind="action")
     async def get_skill_list(self, **_):
         return await self.list_skills(keyword="")
