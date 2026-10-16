@@ -1,0 +1,35 @@
+[plugin]
+id = "skill_compat"
+name = "Skill 兼容加载器"
+description = "让 N.E.K.O 兼容加载各平台（ima/clawhub/skillhub/N.E.K.O）的 skill 包。自动解析不同来源 skill 的格式差异（YAML 头、命名空间嵌套、符号链接、中文目录名、重复目录），把 skill 内容索引并暴露给 N.E.K.O 的 AI 调用。"
+short_description = "兼容并加载各平台 skill，让 AI 调用 skill 内容"
+keywords = ["skill", "兼容", "加载", "compat", "loader", "知识库", "技能", "agent skill", "SKILL.md"]
+version = "0.1.0"
+type = "plugin"
+entry = "plugin.plugins.skill_compat:SkillCompatPlugin"
+
+[plugin.author]
+name = "起诉人"
+
+[plugin.sdk]
+recommended = ">=0.1.0,<0.2.0"
+supported = ">=0.1.0,<0.3.0"
+
+[plugin.store]
+enabled = true
+
+[plugin.ui]
+enabled = true
+
+[[plugin.ui.panel]]
+id = "skills"
+title = "已加载 Skill"
+entry = "ui/skills.tsx"
+context = "skills"
+permissions = ["state:read", "action:call", "config:read"]
+
+[[plugin.ui.guide]]
+id = "guide"
+title = "使用指南"
+entry = "docs/guide.md"
+permissions = ["state:read"]

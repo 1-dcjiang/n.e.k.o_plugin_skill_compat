@@ -1,0 +1,10 @@
+[plugin_runtime]
+enabled = true
+auto_start = true
+
+# skill 扫描配置（可在运行时自由修改）
+[settings]
+# skill 搜索目录列表；Windows 示例：["C:\\Users\\jh\\neko-plugins"]，默认指向沙箱路径
+skill_dirs = ["/sandbox/workspace/skills"]
+# 是否跟随符号链接识别 skill（如指向 /root/.skills 的链接）
+follow_symlinks = true
