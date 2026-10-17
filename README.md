@@ -2,7 +2,7 @@
 
 让 N.E.K.O 的猫娘（YUI）**通过对话指令自主安装、管理 skill**，并兼容加载来自各平台（ima / clawhub / skillhub / N.E.K.O）的 skill 包。
 
-装上这个插件后，你不用再手动拖文件、改目录——直接对 YUI 说「安装这个 skill」，她就会完成从下载、解压、安全校验到索引的全部流程。
+装上这个插件后，你不用再手动拖文件、改目录——直接对 YUI 说「安装这个 skill」，她就会完成从下载、解压、安全校验到索引的全部流程；也可以让她**直接在 skillhub 技能商店里搜索并安装**现成的技能。
 
 ---
 
@@ -13,6 +13,7 @@
   - 本地目录（内含 `SKILL.md`，支持 `@owner/slug` 嵌套结构）
   - 本地 `.zip` 压缩包
   - HTTPS 下载链接（`.zip`）
+- **skillhub 商店直达**：对 YUI 说「去 skillhub 搜 XX 技能」「把 XX 技能装上」，她通过 `skillhub_search` / `skillhub_install` 调用本机 skillhub CLI 完成搜索与安装（需先装 skillhub CLI）
 - **跨平台格式兼容**：自动解析 ima / clawhub / skillhub / N.E.K.O 各来源的格式差异——YAML 头、命名空间嵌套、符号链接、中文目录名、重复目录
 - **大文件先询问、不硬拒**：来源超过默认资源上限（200MB / 5000 条目）时转为询问确认，而不是直接禁止
 - **索引自愈**：扫描失败、目录变更后自动重建索引，AI 看到的始终是磁盘上的真实状态
@@ -29,6 +30,9 @@ https://market.project-neko.cn/#/plugin/105
 
 点击「安装插件」→ 在 N.E.K.O 客户端确认 → 完成后重启一次对话即可。
 
+> 若要用 skillhub 商店功能，请先按官方指南安装 skillhub CLI：
+> `https://skillhub.cn/install/skillhub.md`
+
 ---
 
 ## 🚀 快速上手
@@ -40,6 +44,8 @@ https://market.project-neko.cn/#/plugin/105
 | 查看有哪些 skill | 「列出所有可用的 skill」 |
 | 按主题找 skill | 「搜索一下关于 XX 的 skill」 |
 | 安装 skill | 「帮我安装这个 skill，链接是 https://…」 |
+| 从 skillhub 找技能 | 「去 skillhub 搜一下 PDF 相关的技能」 |
+| 从 skillhub 装技能 | 「把 skillhub 上的 XX 技能装到本机」 |
 | 看某个 skill 的用法 | 「加载 XX skill 的说明」 |
 | 排查没被识别的 skill | 「检查一下 skill 加载状态」 |
 
@@ -55,6 +61,12 @@ https://market.project-neko.cn/#/plugin/105
 帮我安装这个 skill：https://example.com/skill.zip
 ```
 
+示例（skillhub）：
+
+```
+去 skillhub 搜一下 PDF 相关的技能，然后把第一个装到本机
+```
+
 ---
 
 ## 🧰 提供给 YUI 的工具
@@ -62,6 +74,8 @@ https://market.project-neko.cn/#/plugin/105
 | 工具 | 作用 |
 |---|---|
 | `install_skill` | 安装/导入 skill（本地目录 / zip / https 链接），装完自动刷新索引 |
+| `skillhub_search` | 在 skillhub 技能商店按关键词搜索技能（名称/描述/版本/命名空间） |
+| `skillhub_install` | 从 skillhub 商店安装技能到本机 skill 目录，装完自动刷新索引 |
 | `list_skills` | 列出所有已索引的 skill（名称、描述、路径、类型） |
 | `load_skill` | 加载指定 skill 的完整 `SKILL.md` 内容 |
 | `search_skills` | 按关键词在 skill 名称与描述中搜索 |
@@ -76,7 +90,9 @@ https://market.project-neko.cn/#/plugin/105
 - **SSRF 防护**：下载来源逐跳校验，拒绝内网地址、云元数据地址（169.254.169.254 / 100.100.100.200 等）、IPv4 映射 IPv6 绕过；重定向最多跟随 5 跳且逐跳复查
 - **路径穿越拦截**：zip 内绝对路径、`../` 越界条目直接拒绝
 - **符号链接拒绝**：zip 内的符号链接条目不释放，防止解压后指向目录外文件
-- **zip 炸弹防护**：gzip 解压分块限流，超限转询问，防止解压内存暴涨
+- **zip 炸弹防护**：gzip 解压分块限流；解压后按磁盘实际占用复核（防「声明小、解压大」的变体），超限转询问
+- **skillhub 子进程安全**：用独立探测的真实 Python 运行 CLI（打包 exe 不能当解释器）；剥离宿主代理环境变量（避免网络请求静默失败）；找不到 CLI/解释器时给出可操作的下一步提示
+- **覆盖不误删**：`overwrite` 交给 skillhub CLI 自己的 `--force` 按实际目录覆盖，插件不猜测、不预删用户目录
 - **严格参数解析**：布尔参数严格解析（`"false"` 字符串不会再被当成 `True` 覆盖安装）
 - **临时文件清理**：校验或下载失败时自动清理临时目录，不残留垃圾
 - **内容即数据**：skill 内容是数据不是命令，插件不会盲目执行其中的指令
@@ -87,7 +103,7 @@ https://market.project-neko.cn/#/plugin/105
 
 - 兼容 ima / clawhub / skillhub / N.E.K.O 各平台发布的 skill 包
 - 支持 `@owner/slug` 嵌套目录、中文目录名、YAML 头格式差异
-- 安装目标目录由 N.E.K.O 的 `settings.skill_dirs` 配置决定（取第一个可写目录）
+- 安装目标目录由 N.E.K.O 的 `settings.skill_dirs` 配置决定（取第一个可写目录）；建议把第一个目录配成你自己的稳定目录（如 `C:\Users\<你>\.neko-skills`），避免装在会被其他程序清理的目录里
 
 ---
 
@@ -95,7 +111,10 @@ https://market.project-neko.cn/#/plugin/105
 
 | 版本 | 要点 |
 |---|---|
-| **v0.1.7** | 当前正式版（安全与可靠性加固全部生效） |
+| **v0.1.10** | 当前正式版。修复：skillhub 覆盖不再预删目录（交给 CLI `--force`）、CLI 失败不再被旧目录掩盖、重装同名不再误报失败、namespace 兼容字符串、跳过 WindowsApps 假 python、zip 解压后实际占用复核 |
+| v0.1.9 | 新增 `skillhub_search` / `skillhub_install` 工具：调用本机 skillhub CLI 搜索并安装商店技能（独立 python 探测、代理剥离、UTF-8 解码） |
+| v0.1.8 | README 改为用户向介绍并同步至 Market |
+| v0.1.7 | 安全与可靠性加固全部生效 |
 | v0.1.6 | 扫描失败回退未扫描态、失败清理临时目录、gzip 炸弹分块限流、非字符串参数防御 |
 | v0.1.5 | 布尔参数严格解析、索引以磁盘为准重建、安装失败不再误报、配置读取失败回退默认值 |
 | v0.1.4 | SSRF 全面防护（重定向/IPv6 映射绕过）、zip 符号链接与盘符条目拒绝 |
