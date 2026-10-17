@@ -35,6 +35,24 @@ https://market.project-neko.cn/#/plugin/105
 > 若要用 skillhub 商店功能，请先按官方指南安装 skillhub CLI：
 > `https://skillhub.cn/install/skillhub.md`
 
+### ⚙️ 自动开启（推荐）
+
+插件不会随 N.E.K.O 重启自动加载，需要开启一次。仓库 `scripts/` 提供自动开启脚本，登录 Windows 后自动把插件拉起（幂等，已就绪则跳过）：
+
+```text
+scripts\autostart_skill_compat.ps1    # 主脚本：等待 N.E.K.O → POST start → 等待工具就绪
+scripts\autostart_skill_compat.bat    # 静默包装（启动文件夹用）
+```
+
+一键注册（把两个文件复制到启动文件夹）：
+
+```powershell
+Copy-Item -Force scripts\autostart_skill_compat.bat "$([Environment]::GetFolderPath('Startup'))\"
+Copy-Item -Force scripts\autostart_skill_compat.ps1 "$([Environment]::GetFolderPath('Startup'))\"
+```
+
+日志写在 `%LOCALAPPDATA%\N.E.K.O\plugins\skill_compat\autostart.log`，退出码 0=成功 / 1=失败。
+
 ---
 
 ## 🚀 快速上手
@@ -121,7 +139,8 @@ https://market.project-neko.cn/#/plugin/105
 
 | 版本 | 要点 |
 |---|---|
-| **v0.1.17** | 当前正式版。新增 `remove_skill` 删除工具（越界路径拒绝、符号链接只删链接本身、目录已不存在时容错清理索引）；免责声明文案强化「请回复我确认」的明确引导 |
+| **v0.1.18** | 当前正式版。新增 `scripts/autostart_skill_compat.ps1` 自动开启脚本（等待 N.E.K.O → 自动 POST start → 轮询工具就绪，幂等 + 日志 + 退出码，可注册到启动文件夹随登录自动拉起插件）；plugin.toml 补 `[plugin_runtime] auto_start = true`（官方声明模式，供宿主后续版本支持自动加载） |
+| v0.1.17 | 新增 `remove_skill` 删除工具（越界路径拒绝、符号链接只删链接本身、目录已不存在时容错清理索引）；免责声明文案强化「请回复我确认」的明确引导 |
 | v0.1.16 | 新增**安装免责声明确认**：首次安装 skill 前自动提示风险与免责声明，需用户在对话中回复「我确认」、由 AI 调用 `confirm_consent` 记录一次，之后本机安装不再询问（持久化在插件数据目录，升级不丢失）；修复 `audit_skill` 指定 `name` 详查在真实框架下取不到参数的问题；`load_skill` 读取超大 SKILL.md 改为截断防输出爆炸 |
 | v0.1.15 | `audit_skill` 精简为初步筛查：默认只返回每个 skill 的风险等级 + 重点关注清单（不再铺开全部明细），指定 `name` 才看单 skill 详细命中；对常见误报降噪（`subprocess` 单列 medium、凭证词按"文档提及 vs 脚本读取敏感文件"分级） |
 | v0.1.14 | 新增 `audit_skill` 安全审计（初版全量明细，输出过大，v0.1.15 已精简） |
