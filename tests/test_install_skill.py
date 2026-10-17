@@ -57,7 +57,7 @@ def _consent_plugin(target_root: Path, consent_file: Path) -> SkillCompatPlugin:
 
 
 def test_install_requires_consent_first(tmp_path):
-    """首次未确认：install_skill 返回 CONSENT_REQUIRED + 免责声明。"""
+    """首次未确认：install_skill 返回 CONSENT_REQUIRED + 免责声明（含明确的「我确认」引导）。"""
     src = _make_skill(tmp_path, "hello-skill")
     target = tmp_path / "root"
     target.mkdir()
@@ -65,6 +65,7 @@ def test_install_requires_consent_first(tmp_path):
     r = asyncio.run(p.install_skill(source=str(src)))
     assert r["is_error"] is True and r["error"] == "CONSENT_REQUIRED", r
     assert "免责" in r["output"] and "确认" in r["output"]
+    assert "我确认" in r["output"]
     # 未确认时绝不能落盘
     assert not (target / "hello-skill").exists()
 
@@ -134,6 +135,93 @@ def test_audit_skill_name_via_parameters(tmp_path):
     assert isinstance(r, Ok), r
     assert r.value["detailed"] is True
     assert r.value["result"]["name"] == "clean-skill"
+
+
+# ---------- remove_skill：删除已安装 skill ----------
+
+def _remove_plugin(target_root: Path) -> SkillCompatPlugin:
+    """remove 专用实例：已扫描状态，避免 remove_skill 内部 _ensure_scan 覆盖测试塞的索引。"""
+    p = _make_plugin(target_root)
+    p._scan_status = "已加载"
+    return p
+
+
+def test_remove_skill_deletes_dir(tmp_path):
+    """删除普通目录：目录被删、索引清理、返回 deleted。"""
+    target = tmp_path / "root"
+    target.mkdir()
+    d = _make_skill(target, "victim-skill")
+    p = _remove_plugin(target)
+    p._idx = {str(d): {"name": "victim-skill", "dirname": "victim-skill", "path": str(d),
+                       "kind": "dir", "has_yaml": True, "description": ""}}
+    r = asyncio.run(p.remove_skill(name="victim-skill"))
+    assert isinstance(r, Ok), r
+    assert r.value["deleted"] is True and r.value["kind"] == "dir"
+    assert not d.exists()
+    assert str(d) not in p._idx
+
+
+def test_remove_skill_not_found(tmp_path):
+    """删除不存在的 skill → 明确错误。"""
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _remove_plugin(target)
+    r = asyncio.run(p.remove_skill(name="ghost"))
+    assert isinstance(r, Err), r
+    assert "找不到" in str(r.error)
+
+
+def test_remove_skill_symlink_only_deletes_link(tmp_path, monkeypatch):
+    """符号链接条目：只删链接（走 unlink 分支），链接指向的真实目录必须原样保留。
+    Windows 无特权建不了真 symlink，用 monkeypatch 模拟 islink 分支。"""
+    target = tmp_path / "root"
+    target.mkdir()
+    real = tmp_path / "real-dir"
+    real.mkdir()
+    (real / "SKILL.md").write_text("---\nname: linked\ndescription: d\n---\n", encoding="utf-8")
+    link = target / "linked-skill"
+    link.write_text("link-marker", encoding="utf-8")  # 普通文件模拟链接条目
+    p = _remove_plugin(target)
+    p._idx = {str(link): {"name": "linked-skill", "dirname": "linked-skill", "path": str(link),
+                          "kind": "symlink", "has_yaml": True, "description": ""}}
+    monkeypatch.setattr(os.path, "islink", lambda p: p == str(link))
+    r = asyncio.run(p.remove_skill(name="linked-skill"))
+    assert isinstance(r, Ok), r
+    assert r.value["kind"] == "symlink"
+    assert not link.exists(), "链接条目应被删除"
+    assert real.exists() and (real / "SKILL.md").is_file(), "链接指向的真实目录必须保留"
+
+
+def test_remove_skill_path_escape_rejected(tmp_path):
+    """索引指向受管目录之外的路径 → 拒绝删除（防越权）。"""
+    target = tmp_path / "root"
+    target.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text("x", encoding="utf-8")
+    p = _remove_plugin(target)
+    # 恶意/损坏索引：path 指向目录外
+    p._idx = {str(outside): {"name": "evil", "dirname": "evil", "path": str(outside),
+                             "kind": "dir", "has_yaml": True, "description": ""}}
+    r = asyncio.run(p.remove_skill(name="evil"))
+    assert isinstance(r, Err), r
+    assert "拒绝" in str(r.error)
+    assert outside.exists(), "目录外的目标绝不能被动到"
+
+
+def test_remove_skill_missing_dir_ok(tmp_path):
+    """目录已被外部删除：视为已删除成功并清理索引（不报错）。"""
+    target = tmp_path / "root"
+    target.mkdir()
+    d = _make_skill(target, "gone-skill")
+    p = _remove_plugin(target)
+    p._idx = {str(d): {"name": "gone-skill", "dirname": "gone-skill", "path": str(d),
+                       "kind": "dir", "has_yaml": True, "description": ""}}
+    shutil.rmtree(d)  # 模拟外部已删
+    r = asyncio.run(p.remove_skill(name="gone-skill"))
+    assert isinstance(r, Ok), r
+    assert r.value["deleted"] is True
+    assert str(d) not in p._idx
 
 
 # ---------- _safe_name ----------

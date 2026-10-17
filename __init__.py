@@ -120,7 +120,8 @@ _CONSENT_TEXT = (
     "1. skill 是第三方提供的内容，可能包含可执行脚本，存在危险命令、数据外传、提示注入、索要敏感信息等风险；\n"
     "2. 安装前可先用 audit_skill 做只读安全筛查（不执行、不联网）；\n"
     "3. 确认安装即表示你已知悉风险并自行承担后果，安装后请勿盲目执行其中指令。\n"
-    "如你已阅读并同意，请回复「我确认」或「同意」；确认记录仅首次需要，之后本机安装不再询问。"
+    "⚠️ 如你已阅读并同意，请在对话中直接回复「我确认」或「同意」三个字，"
+    "AI 就会调用 confirm_consent 记录本次确认（仅首次需要，之后本机安装不再询问）。"
 )
 
 
@@ -302,7 +303,7 @@ def _download_url_with_redirects(url, max_bytes: int, confirm_large: bool = Fals
             else:
                 conn = http.client.HTTPConnection(host, port, timeout=60)
             conn.request("GET", path, headers={
-                "User-Agent": "N.E.K.O-skill_compat/0.1.16",
+                "User-Agent": "N.E.K.O-skill_compat/0.1.17",
                 "Connection": "close",
                 "Accept": "application/zip,application/octet-stream,*/*",
                 "Accept-Encoding": "identity",
@@ -686,7 +687,7 @@ class SkillCompatPlugin(NekoPluginBase):
             "total": len(items),
             "symlink_count": symlink_n,
             "missing_yaml_header": no_yaml,
-            "consent": "已确认" if self._load_consent() else "待确认（首次安装前需用户确认免责声明）",
+            "consent": "已确认" if self._load_consent() else "待确认（首次安装前需用户确认免责声明，请回复「我确认」）",
         })
 
     # ══════════ LLM 工具：skill 安全审计 ══════════
@@ -873,7 +874,7 @@ class SkillCompatPlugin(NekoPluginBase):
         # 首次安装前置：需用户确认第三方 skill 免责声明
         ok, consent_text = self._require_consent()
         if not ok:
-            return {"output": consent_text + "\n\n如已同意，请回复「我确认」，让 AI 调用 confirm_consent 完成记录。",
+            return {"output": consent_text,
                     "is_error": True, "error": "CONSENT_REQUIRED"}
         # 目标根：skill_dirs 中第一个存在且可写的目录
         target_root = None
@@ -942,6 +943,72 @@ class SkillCompatPlugin(NekoPluginBase):
                     shutil.rmtree(tmp_root, ignore_errors=True)
                 except Exception:
                     pass
+
+    @llm_tool(
+        name="remove_skill",
+        description="删除已安装的 skill 并刷新索引。何时用：用户明确说'删除/卸载/移除 XX skill'时。前置：先用 list_skills 确认要删除的准确名称。安全：只删除本插件受管 skill 目录内的条目（越界路径一律拒绝）；符号链接条目只删链接本身、绝不删链接指向的真实目录；该操作不可逆，仅在用户明确要求删除时调用。",
+        parameters={"type": "object", "properties": {
+            "name": {"type": "string", "description": "要删除的 skill 名称（list_skills 返回的 name）"},
+        }, "required": ["name"]},
+        timeout=120.0,
+    )
+    async def remove_skill(self, *, name: str = "", **_):
+        params = _.get('parameters') or {}
+        name = name or params.get('name')
+        name = str(name).strip() if name else ''
+        if not name:
+            return Err(SdkError("缺少参数 name。请先调 list_skills 查看要删除的 skill 名称。"))
+        await self._ensure_scan()
+        info = self._find_by_name(name)
+        if not info:
+            with self._lock:
+                names = [v.get('name') or '' for v in self._idx.values()]
+            names = [n for n in names if n]
+            similar = [n for n in names if n.lower().startswith(name.lower())][:3]
+            hint = f"你是否想删: {similar}" if similar else "请先调 list_skills 查看可用名称"
+            return Err(SdkError(f"找不到名为 '{name}' 的 skill。{hint}"))
+        target = info['path']
+        # 防御1：只允许删除受管 skill 目录内的条目（防误删其他目录；Windows 大小写不敏感）
+        abs_target = os.path.abspath(target)
+        root_ok = any(
+            abs_target.casefold().startswith(os.path.abspath(d).casefold() + os.sep)
+            for d in self._skill_dirs if os.path.isdir(d)
+        )
+        if not root_ok:
+            return Err(SdkError(f"拒绝删除：{target} 不在受管的 skill 目录内，已停止。"))
+        # 防御2：符号链接条目只删链接本身，绝不能 rmtree 删掉链接指向的真实目录
+        if info.get('kind') == 'symlink' or os.path.islink(target):
+            try:
+                await asyncio.to_thread(os.unlink, target)
+            except Exception as e:
+                return Err(SdkError(f"删除链接失败: {e}"))
+            with self._lock:
+                self._idx.pop(target, None)
+            try:
+                await self._scan_all()
+            except Exception:
+                with self._lock:
+                    self._scan_status = "未扫描"
+            return Ok({"deleted": True, "name": name, "path": target, "kind": "symlink",
+                       "scan_status": self._scan_status,
+                       "hint": "已删除该链接条目；链接指向的原始目录未受影响。"})
+        # 普通目录：目录已被外部删除时视为删除成功（清理索引即可）
+        try:
+            await asyncio.to_thread(shutil.rmtree, target, ignore_errors=False)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            return Err(SdkError(f"删除目录失败: {e}"))
+        with self._lock:
+            self._idx.pop(target, None)
+        try:
+            await self._scan_all()
+        except Exception:
+            with self._lock:
+                self._scan_status = "未扫描"
+        return Ok({"deleted": True, "name": name, "path": target, "kind": "dir",
+                   "scan_status": self._scan_status,
+                   "hint": "已删除该 skill 目录并刷新索引。"})
 
     # ══════════ LLM 工具：skillhub 商店搜索/安装 ══════════
 
@@ -1071,7 +1138,7 @@ class SkillCompatPlugin(NekoPluginBase):
         # 首次安装前置：需用户确认第三方 skill 免责声明
         ok, consent_text = self._require_consent()
         if not ok:
-            return Err(SdkError(consent_text + "\n\n如已同意，请回复「我确认」，让 AI 调用 confirm_consent 完成记录。"))
+            return Err(SdkError(consent_text))
         target_root = None
         for d in self._skill_dirs:
             if os.path.isdir(d) and os.access(d, os.W_OK):
