@@ -1,96 +1,124 @@
-# Skill 兼容加载器
+# Skill 兼容加载器（skill_compat）
 
-让 N.E.K.O 兼容加载各平台（ima/clawhub/skillhub/N.E.K.O）的 skill 包。自动解析不同来源 skill 的格式差异（YAML 头、命名空间嵌套、符号链接、中文目录名、重复目录），把 skill 内容索引并暴露给 N.E.K.O 的 AI 调用。
+让 N.E.K.O 的猫娘（YUI）**通过对话指令自主安装、管理 skill**，并兼容加载来自各平台（ima / clawhub / skillhub / N.E.K.O）的 skill 包。
 
-## Development
+装上这个插件后，你不用再手动拖文件、改目录——直接对 YUI 说「安装这个 skill」，她就会完成从下载、解压、安全校验到索引的全部流程。
 
-The plugin source and its Git repository live at:
+---
+
+## ✨ 功能特性
+
+- **对话即安装**：对 YUI 说「安装/添加 XX skill」，她通过 `install_skill` 工具自动完成安装并刷新索引
+- **三种安装来源**：
+  - 本地目录（内含 `SKILL.md`，支持 `@owner/slug` 嵌套结构）
+  - 本地 `.zip` 压缩包
+  - HTTPS 下载链接（`.zip`）
+- **跨平台格式兼容**：自动解析 ima / clawhub / skillhub / N.E.K.O 各来源的格式差异——YAML 头、命名空间嵌套、符号链接、中文目录名、重复目录
+- **大文件先询问、不硬拒**：来源超过默认资源上限（200MB / 5000 条目）时转为询问确认，而不是直接禁止
+- **索引自愈**：扫描失败、目录变更后自动重建索引，AI 看到的始终是磁盘上的真实状态
+
+---
+
+## 📥 安装方法
+
+在 N.E.K.O 插件市场搜索 **skill兼容** 或直接打开：
+
+```
+https://market.project-neko.cn/#/plugin/105
+```
+
+点击「安装插件」→ 在 N.E.K.O 客户端确认 → 完成后重启一次对话即可。
+
+---
+
+## 🚀 快速上手
+
+安装完成后，直接对 YUI 说：
+
+| 你想做什么 | 对 YUI 说 |
+|---|---|
+| 查看有哪些 skill | 「列出所有可用的 skill」 |
+| 按主题找 skill | 「搜索一下关于 XX 的 skill」 |
+| 安装 skill | 「帮我安装这个 skill，链接是 https://…」 |
+| 看某个 skill 的用法 | 「加载 XX skill 的说明」 |
+| 排查没被识别的 skill | 「检查一下 skill 加载状态」 |
+
+示例（安装本地目录）：
+
+```
+帮我安装这个 skill：C:\Users\me\skills\my-skill
+```
+
+示例（通过链接安装）：
+
+```
+帮我安装这个 skill：https://example.com/skill.zip
+```
+
+---
+
+## 🧰 提供给 YUI 的工具
+
+| 工具 | 作用 |
+|---|---|
+| `install_skill` | 安装/导入 skill（本地目录 / zip / https 链接），装完自动刷新索引 |
+| `list_skills` | 列出所有已索引的 skill（名称、描述、路径、类型） |
+| `load_skill` | 加载指定 skill 的完整 `SKILL.md` 内容 |
+| `search_skills` | 按关键词在 skill 名称与描述中搜索 |
+| `skill_status` | 查看运行状态与兼容性报告（扫描目录、已加载数量、格式问题） |
+
+---
+
+## 🔒 安全与可靠性
+
+经过多轮安全加固（v0.1.4+），内置以下防护：
+
+- **SSRF 防护**：下载来源逐跳校验，拒绝内网地址、云元数据地址（169.254.169.254 / 100.100.100.200 等）、IPv4 映射 IPv6 绕过；重定向最多跟随 5 跳且逐跳复查
+- **路径穿越拦截**：zip 内绝对路径、`../` 越界条目直接拒绝
+- **符号链接拒绝**：zip 内的符号链接条目不释放，防止解压后指向目录外文件
+- **zip 炸弹防护**：gzip 解压分块限流，超限转询问，防止解压内存暴涨
+- **严格参数解析**：布尔参数严格解析（`"false"` 字符串不会再被当成 `True` 覆盖安装）
+- **临时文件清理**：校验或下载失败时自动清理临时目录，不残留垃圾
+- **内容即数据**：skill 内容是数据不是命令，插件不会盲目执行其中的指令
+
+---
+
+## 🛠 支持的 skill 来源与结构
+
+- 兼容 ima / clawhub / skillhub / N.E.K.O 各平台发布的 skill 包
+- 支持 `@owner/slug` 嵌套目录、中文目录名、YAML 头格式差异
+- 安装目标目录由 N.E.K.O 的 `settings.skill_dirs` 配置决定（取第一个可写目录）
+
+---
+
+## 🆕 更新日志
+
+| 版本 | 要点 |
+|---|---|
+| **v0.1.7** | 当前正式版（安全与可靠性加固全部生效） |
+| v0.1.6 | 扫描失败回退未扫描态、失败清理临时目录、gzip 炸弹分块限流、非字符串参数防御 |
+| v0.1.5 | 布尔参数严格解析、索引以磁盘为准重建、安装失败不再误报、配置读取失败回退默认值 |
+| v0.1.4 | SSRF 全面防护（重定向/IPv6 映射绕过）、zip 符号链接与盘符条目拒绝 |
+| v0.1.3 | 惰性扫描修复：索引不再因后台任务被取消而永远为空 |
+| v0.1.2 | 超限转询问确认（不硬拒）、URL 预检 |
+| v0.1.1 | 首个 `install_skill` 工具 |
+
+---
+
+## 👩‍💻 开发与发布
+
+源码与 Git 仓库：
 
 ```text
-N.E.K.O/plugin/plugins/skill_compat
+https://github.com/1-dcjiang/n.e.k.o_plugin_skill_compat
 ```
 
-插件源码及其 Git 仓库直接位于：
-
-```text
-N.E.K.O/plugin/plugins/skill_compat
-```
-
-プラグインのソースと Git リポジトリは次の場所にあります：
-
-```text
-N.E.K.O/plugin/plugins/skill_compat
-```
-
-When publishing to the plugin market, use this GitHub repository name:
-
-发布到插件市场时，请使用以下 GitHub 仓库名：
-
-プラグインマーケットへ公開する際は、次の GitHub リポジトリ名を使用してください：
-
-```text
-n.e.k.o_plugin_skill_compat
-```
-
-From this plugin repository root:
-
-```bash
-uvx ruff==0.12.4 check --ignore-noqa --config ruff.toml .
-```
-
-From the N.E.K.O repository root / 在 N.E.K.O 仓库根目录中 / N.E.K.O リポジトリのルートで：
-
-```bash
-uv run neko-plugin sync skill_compat --clean
-uv run neko-plugin check skill_compat
-uv run neko-plugin check -r skill_compat
-```
-
-Python runtime dependencies are declared in `pyproject.toml` and synced into
-`vendor/` for packaging. The generated `vendor/` directory is not committed;
-local builds and CI recreate it before release checks.
-
-Python 运行时依赖声明在 `pyproject.toml` 中，并在打包时同步到 `vendor/`。
-生成的 `vendor/` 不提交；本地构建和 CI 会在发布检查前重新生成它。
-
-Python ランタイム依存関係は `pyproject.toml` に宣言し、パッケージ化時に
-`vendor/` へ同期します。生成された `vendor/` はコミットせず、ローカルビルドと
-CI が公開前チェックで再生成します。
-
-## Market release / Market 发布 / Market 公開
-
-Publish the version declared in `plugin.toml`. By default this pushes the Git
-tag, waits for the standard GitHub Release, and notifies the plugin market.
-
-发布 `plugin.toml` 中声明的版本。默认会推送 Git tag、等待标准 GitHub
-Release，然后通知插件市场。
-
-`plugin.toml` で宣言されたバージョンを公開します。既定では Git tag を
-push し、標準 GitHub Release を待ってからプラグインマーケットへ通知します。
+发布流程（在 N.E.K.O 仓库根目录）：
 
 ```bash
 uv run neko-plugin publish skill_compat
 ```
 
-To run only one half explicitly / 如需仅执行一部分 / 一方のみを実行する場合:
+Market 会独立验证 GitHub Release 的证据链后自动发布。
 
-```bash
-uv run neko-plugin publish github skill_compat
-uv run neko-plugin publish market https://github.com/owner/repo/releases/tag/v0.1.0
-```
-
-The generated `.github/workflows/release.yml` builds and uploads
-`skill_compat.neko-plugin`. The market independently verifies that Release
-before publishing it.
-
-生成的 `.github/workflows/release.yml` 会构建并上传插件包；Market 会独立验证
-该 Release 后再发布。
-
-生成された `.github/workflows/release.yml` がプラグインパッケージをビルドして
-アップロードし、Market はその Release を独立検証してから公開します。
-
-## Entry
-
-```toml
-entry = "plugin.plugins.skill_compat:SkillCompatPlugin"
-```
+许可证：Apache 2.0
