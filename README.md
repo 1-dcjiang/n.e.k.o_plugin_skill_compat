@@ -111,7 +111,8 @@ https://market.project-neko.cn/#/plugin/105
 
 | 版本 | 要点 |
 |---|---|
-| **v0.1.11** | 当前正式版。修复：大文件确认后不再截断（zip 损坏导致装不上）、支持 `@owner/slug` 双层嵌套 zip、配置布尔严格解析、拒绝 Windows 保留目录名（CON/NUL 等）、SKILL.md 兼容 UTF-8 BOM |
+| **v0.1.12** | 当前正式版。对齐官方规范：所有 LLM 工具显式设置超时（安装/搜索类 120–300s，避免真实调用被 30s 默认超时掐断）、查询类工具签名加 `*` 防位置参数 |
+| v0.1.11 | 修复：大文件确认后不再截断（zip 损坏导致装不上）、支持 `@owner/slug` 双层嵌套 zip、配置布尔严格解析、拒绝 Windows 保留目录名（CON/NUL 等）、SKILL.md 兼容 UTF-8 BOM |
 | v0.1.10 | 修复：skillhub 覆盖不再预删目录（交给 CLI `--force`）、CLI 失败不再被旧目录掩盖、重装同名不再误报失败、namespace 兼容字符串、跳过 WindowsApps 假 python、zip 解压后实际占用复核 |
 | v0.1.9 | 新增 `skillhub_search` / `skillhub_install` 工具：调用本机 skillhub CLI 搜索并安装商店技能（独立 python 探测、代理剥离、UTF-8 解码） |
 | v0.1.8 | README 改为用户向介绍并同步至 Market |
