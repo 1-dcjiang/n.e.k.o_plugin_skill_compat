@@ -1,5 +1,6 @@
-"""install_skill（AI 自主安装 skill）逻辑测试。"""
+"""install_skill（AI 自主安装 skill）逻辑与安全测试。"""
 import asyncio
+import http.server
 import threading
 import zipfile
 from pathlib import Path
@@ -220,6 +221,71 @@ def test_install_unsafe_url_rejected(tmp_path):
     p = _make_plugin(target)
     result = _err(asyncio.run(p.install_skill(source="http://127.0.0.1/evil.zip")))
     assert "不安全" in result["output"]
+
+
+def test_ipv4_mapped_ipv6_rejected():
+    """IPv4-mapped IPv6（::ffff:127.0.0.1 实为 127.0.0.1）不得绕过 SSRF 预筛选。"""
+    assert sc._ip_is_safe("::ffff:127.0.0.1") is False
+    assert sc._ip_is_safe("::ffff:169.254.169.254") is False
+    assert sc._ip_is_safe("::ffff:0.0.0.0") is False
+    assert sc._ip_is_safe("::ffff:1.2.3.4") is True
+    assert sc._url_safe("http://[::ffff:127.0.0.1]/x.zip") is False
+    assert sc._url_safe("http://[::ffff:169.254.169.254]/latest/meta-data/") is False
+
+
+def test_redirect_to_private_rejected(tmp_path, monkeypatch):
+    """重定向目标是内网时必须拒绝（防 302 跳内网 = SSRF）。"""
+    import pytest
+
+    class _Redirector(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1:1/evil.zip")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _Redirector)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        # 源 URL 形如公网（local 别名），放行；重定向到 127.0.0.1 需被拒
+        with pytest.raises(ValueError, match="已拒绝"):
+            sc._download_url_with_redirects(
+                f"http://localhost:{srv.server_port}/src.zip", 1024, False)
+    finally:
+        srv.shutdown()
+        t.join()
+
+
+def test_zip_symlink_entry_rejected(tmp_path):
+    """zip 内含符号链接条目必须拒绝（解压后指向外部路径，copytree 会跟随复制）。"""
+    zpath = tmp_path / "symlink.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zi = zipfile.ZipInfo("link-skill/SKILL.md")
+        zi.create_system = 3  # Unix
+        zi.external_attr = (0o120000 << 16)  # symlink
+        zf.writestr(zi, "---\nname: link-skill\n---\n")
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+    result = _err(asyncio.run(p.install_skill(source=str(zpath))))
+    assert "符号链接" in result["output"]
+    assert not (target / "link-skill").exists()
+
+
+def test_zip_drive_letter_entry_rejected(tmp_path):
+    """zip 内含 Windows 盘符绝对路径条目必须拒绝。"""
+    zpath = tmp_path / "drive.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr("C:/evil/SKILL.md", "---\nname: evil\n---\n")
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+    result = _err(asyncio.run(p.install_skill(source=str(zpath))))
+    assert "盘符" in result["output"]
+    assert not (target / "evil").exists()
 
 
 def test_install_https_zip_fails_on_unreachable(tmp_path):

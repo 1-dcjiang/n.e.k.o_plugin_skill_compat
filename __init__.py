@@ -8,16 +8,16 @@
 - 索引以 path 为主键（name 可重复，不覆盖丢失）；按 name 查找时遍历索引
 """
 import asyncio
+import http.client
 import ipaddress
 import os
 import re
 import shutil
 import socket
+import ssl
 import tempfile
 import threading
-import urllib.error
 import urllib.parse
-import urllib.request
 import zipfile
 
 from plugin.sdk.plugin import (
@@ -80,6 +80,119 @@ def _safe_name(s):
     if not base or base in ('.', '..'):
         return None
     return base
+
+
+def _ip_is_safe(ip_str: str) -> bool:
+    """IP 是否可安全访问：拒绝内网/回环/链路本地/保留/组播/云元数据地址。
+
+    注意归一化 IPv4-mapped IPv6（::ffff:127.0.0.1 实为 127.0.0.1），
+    否则 is_loopback/is_private 判断会漏判，构成 SSRF 绕过。
+    """
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return not (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast)
+
+
+def _url_safe(raw: str) -> bool:
+    """URL 输入预筛选：拒绝明显危险形态（内网/回环/保留地址/云元数据）。
+
+    注意：这是预筛选，不是完整 SSRF 防护（DNS rebinding 仍可能绕过，
+    重定向由 _download_url_with_redirects 逐跳校验）。
+    """
+    try:
+        p = urllib.parse.urlparse(raw)
+    except Exception:
+        return False
+    if p.scheme not in ("http", "https"):
+        return False
+    host = (p.hostname or "").lower()
+    # 拒绝保留/内网主机名
+    if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1") or host.endswith(".local"):
+        return False
+    if host in ("169.254.169.254", "100.100.100.200", "metadata.google.internal"):
+        return False
+    # 解析 IP 再判（防 2130706433 / IPv6 简写 / @ 混淆 / IPv4-mapped IPv6）
+    try:
+        for info in socket.getaddrinfo(host, None):
+            if not _ip_is_safe(info[4][0]):
+                return False
+    except Exception:
+        return False
+    return True
+
+
+def _download_url_with_redirects(url, max_bytes: int, confirm_large: bool = False):
+    """带安全重定向校验的下载：http.client 手动请求，逐跳校验目标 URL。
+
+    - 每跳重定向目标都过 _url_safe（防 302 到内网/云元数据 = SSRF）
+    - 最多 5 跳，防重定向死循环
+    - Content-Length 预判超限 → _NeedConfirmation（询问确认）
+    - 下载内容超限 → _NeedConfirmation（询问确认）
+    - TLS 走系统默认校验（不跳过证书）
+    """
+    current = url
+    for _ in range(6):
+        if not _url_safe(current):
+            raise ValueError(f"下载目标不安全，已拒绝: {current}")
+        try:
+            p = urllib.parse.urlparse(current)
+        except Exception:
+            raise ValueError(f"无法解析下载 URL: {current}")
+        host = p.hostname or ""
+        port = p.port or (443 if p.scheme == "https" else 80)
+        path = (p.path or "/") + (("?" + p.query) if p.query else "")
+        try:
+            if p.scheme == "https":
+                conn = http.client.HTTPSConnection(host, port, timeout=60)
+            else:
+                conn = http.client.HTTPConnection(host, port, timeout=60)
+            conn.request("GET", path, headers={
+                "User-Agent": "N.E.K.O-skill_compat/0.1.4",
+                "Connection": "close",
+                "Accept": "application/zip,application/octet-stream,*/*",
+            })
+            resp = conn.getresponse()
+        except (ssl.SSLError, OSError, http.client.HTTPException) as e:
+            raise ValueError(
+                f"下载失败: {e}。下一步：若报证书校验失败，请改用本地路径/zip 导入，"
+                "或先手动下载再提供本地路径。")
+        # 重定向：逐跳校验目标
+        if 300 <= resp.status < 400:
+            loc = resp.getheader("Location")
+            conn.close()
+            if not loc:
+                raise ValueError(f"重定向响应缺少 Location: {current} (status={resp.status})")
+            current = urllib.parse.urljoin(current, loc)
+            continue
+        if resp.status >= 400:
+            conn.close()
+            raise ValueError(f"下载失败: HTTP {resp.status} {resp.reason}。下一步：确认链接有效；或手动下载后提供本地路径。")
+        # Content-Length 预判超限 → 询问
+        cl = resp.getheader("Content-Length")
+        if cl:
+            try:
+                cl_n = int(cl)
+            except ValueError:
+                cl_n = 0
+            if not confirm_large and cl_n > max_bytes:
+                conn.close()
+                raise _NeedConfirmation(
+                    f"下载文件约 {round(cl_n / (1024 * 1024), 1)}MB，超过默认上限 {max_bytes // (1024 * 1024)}MB",
+                    {"size_mb": round(cl_n / (1024 * 1024), 1), "source": "Content-Length"},
+                )
+        try:
+            data = resp.read(max_bytes + 1)
+        except OSError as e:
+            conn.close()
+            raise ValueError(f"下载中断: {e}。下一步：重试或改用本地路径导入。")
+        conn.close()
+        return data
+    raise ValueError(f"重定向次数过多，已拒绝: {url}")
 
 
 @neko_plugin
@@ -205,7 +318,8 @@ class SkillCompatPlugin(NekoPluginBase):
         }
         smd = os.path.join(path, 'SKILL.md')
         try:
-            text = open(smd, encoding='utf-8').read()
+            with open(smd, encoding='utf-8') as f:
+                text = f.read()
         except Exception as e:
             info['error'] = f'SKILL.md 无法读取: {e}'
             return info
@@ -405,37 +519,14 @@ class SkillCompatPlugin(NekoPluginBase):
                     pass
 
     def _is_safe_url(self, raw: str) -> bool:
-        """URL 输入预筛选：拒绝明显危险形态（内网/回环/保留地址/云元数据）。
-        注意这只是预筛选，不是完整 SSRF 防护（DNS rebinding/重定向仍可能绕过）。
-        """
-        try:
-            p = urllib.parse.urlparse(raw)
-        except Exception:
-            return False
-        if p.scheme not in ("http", "https"):
-            return False
-        host = (p.hostname or "").lower()
-        # 拒绝保留/内网主机名
-        if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1") or host.endswith(".local"):
-            return False
-        if host in ("169.254.169.254", "100.100.100.200", "metadata.google.internal"):
-            return False
-        # 解析 IP 再判（防 2130706433 / IPv6 简写 / @ 混淆）
-        try:
-            for info in socket.getaddrinfo(host, None):
-                ip = ipaddress.ip_address(info[4][0])
-                if (ip.is_private or ip.is_loopback or ip.is_link_local
-                        or ip.is_reserved or ip.is_multicast):
-                    return False
-        except Exception:
-            return False
-        return True
+        """URL 输入预筛选（模块级 _url_safe；保留实例方法便于测试与内部调用）。"""
+        return _url_safe(raw)
 
     def _stage_source(self, source, confirm_large: bool = False):
         """把 source 变成临时目录下含 SKILL.md 的 skill 根目录。
         返回 (skill_root_dir, 目录名, tmp_root)；tmp_root 为 None 表示直接引用本地目录（不清理）。
         """
-        if source.startswith('http://') or source.startswith('https://'):
+        if source.lower().startswith(('http://', 'https://')):
             return self._stage_from_url(source, confirm_large)
         return self._stage_from_local(source, confirm_large)
 
@@ -478,6 +569,12 @@ class SkillCompatPlugin(NekoPluginBase):
                     n = i.filename.replace('\\', '/')
                     if n.startswith('/') or n.startswith('../') or '/../' in n or n.endswith('/..'):
                         raise ValueError(f"zip 内含非法路径，已拒绝: {n}")
+                    # 防 Windows 盘符绝对路径条目（C:/...，zipfile 虽会剥离盘符，双保险直接拒绝）
+                    if re.match(r'^[a-zA-Z]:', n):
+                        raise ValueError(f"zip 内含盘符路径条目，已拒绝: {n}")
+                    # 防符号链接条目：解压后指向外部路径，copytree 跟随复制会引入外部文件
+                    if ((i.external_attr >> 16) & 0o170000) == 0o120000:
+                        raise ValueError(f"zip 内含符号链接条目，已拒绝: {n}")
                 zf.extractall(tmp)
         except zipfile.BadZipFile:
             raise ValueError(f"不是有效的 zip 文件: {zip_path}")
@@ -490,34 +587,16 @@ class SkillCompatPlugin(NekoPluginBase):
         raise ValueError("zip 里找不到含 SKILL.md 的 skill 目录")
 
     def _stage_from_url(self, url, confirm_large: bool = False):
-        # SSRF 输入预筛选：内网/回环/云元数据一律拒绝
+        # SSRF 输入预筛选：内网/回环/保留地址/云元数据一律拒绝（含 IPv4-mapped IPv6）
         if not self._is_safe_url(url):
             raise ValueError(
                 "不安全的 URL，已拒绝（目标解析为内网/回环/保留地址或云元数据端点）。"
                 "下一步：如果你用的是代理类网络工具（域名被解析到 127.0.0.1），"
                 "请先手动下载该 zip 后提供本地路径导入。")
         tmp = tempfile.mkdtemp(prefix='neko_skill_dl_')
-        req = urllib.request.Request(url, headers={'User-Agent': 'N.E.K.O-skill_compat/0.1.2'})
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                # 先看 Content-Length 预判，超限直接进询问流程，不下载
-                cl = resp.headers.get('Content-Length')
-                if cl:
-                    try:
-                        cl_n = int(cl)
-                    except ValueError:
-                        cl_n = 0
-                    if not confirm_large and cl_n > _MAX_PACKAGE_BYTES:
-                        raise _NeedConfirmation(
-                            f"下载文件约 {round(cl_n / (1024 * 1024), 1)}MB，超过默认上限 {_MAX_PACKAGE_BYTES // (1024 * 1024)}MB",
-                            {"size_mb": round(cl_n / (1024 * 1024), 1), "source": "Content-Length"},
-                        )
-                data = resp.read(_MAX_PACKAGE_BYTES + 1)
-        except urllib.error.URLError as e:
-            reason = getattr(e, 'reason', e)
-            raise ValueError(
-                f"下载失败: {reason}。下一步：若报证书校验失败，请改用本地路径/zip 导入，"
-                "或先手动下载再提供本地路径。")
+        # 安全下载：逐跳校验重定向目标（防 302 跳内网 = SSRF），CL/内容超限转询问确认
+        data = _download_url_with_redirects(
+            url, _MAX_PACKAGE_BYTES, confirm_large)
         if not confirm_large and len(data) > _MAX_PACKAGE_BYTES:
             raise _NeedConfirmation(
                 f"下载内容约 {round(len(data) / (1024 * 1024), 1)}MB，超过默认上限 {_MAX_PACKAGE_BYTES // (1024 * 1024)}MB",
