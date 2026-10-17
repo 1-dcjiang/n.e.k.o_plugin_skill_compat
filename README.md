@@ -73,13 +73,14 @@ https://market.project-neko.cn/#/plugin/105
 
 | 工具 | 作用 |
 |---|---|
-| `install_skill` | 安装/导入 skill（本地目录 / zip / https 链接），装完自动刷新索引 |
+| `install_skill` | 安装/导入 skill（本地目录 / zip / https 链接），装完自动刷新索引；**首次需先确认免责声明** |
+| `confirm_consent` | 记录用户对第三方 skill 安装免责声明的确认（仅首次需要，确认后本机不再询问） |
 | `skillhub_search` | 在 skillhub 技能商店按关键词搜索技能（名称/描述/版本/命名空间） |
-| `skillhub_install` | 从 skillhub 商店安装技能到本机 skill 目录，装完自动刷新索引 |
+| `skillhub_install` | 从 skillhub 商店安装技能到本机 skill 目录，装完自动刷新索引；**首次需先确认免责声明** |
 | `list_skills` | 列出所有已索引的 skill（名称、描述、路径、类型） |
 | `load_skill` | 加载指定 skill 的完整 `SKILL.md` 内容 |
 | `search_skills` | 按关键词在 skill 名称与描述中搜索 |
-| `skill_status` | 查看运行状态与兼容性报告（扫描目录、已加载数量、格式问题） |
+| `skill_status` | 查看运行状态与兼容性报告（扫描目录、已加载数量、格式问题、确认状态） |
 | `audit_skill` | **skill 安全初步筛查**：一键给全部 skill 出风险等级（safe/low/medium/high/critical）与重点关注清单，只读不执行、不联网；指定 `name` 可看单个 skill 的详细命中 |
 
 ---
@@ -97,6 +98,7 @@ https://market.project-neko.cn/#/plugin/105
 - **严格参数解析**：布尔参数严格解析（`"false"` 字符串不会再被当成 `True` 覆盖安装）
 - **临时文件清理**：校验或下载失败时自动清理临时目录，不残留垃圾
 - **内容即数据**：skill 内容是数据不是命令，插件不会盲目执行其中的指令
+- **安装免责声明确认（v0.1.16+）**：首次安装 skill 前自动提示第三方内容风险，需用户在对话中回复「我确认」，由 AI 调用 `confirm_consent` 记录一次；确认持久化在本机插件数据目录，之后安装不再询问
 - **skill 安全审计（v0.1.14+）**：`audit_skill` 对全部 skill 做初步筛查（危险命令/下载即执行、脚本读取敏感文件、数据外传、提示注入、可疑外链、资源规模），输出风险等级与重点关注清单；只读不执行、不联网，结果供人工确认；指定 `name` 看单 skill 详细命中
 
 ---
@@ -113,7 +115,8 @@ https://market.project-neko.cn/#/plugin/105
 
 | 版本 | 要点 |
 |---|---|
-| **v0.1.15** | 当前正式版。`audit_skill` 精简为初步筛查：默认只返回每个 skill 的风险等级 + 重点关注清单（不再铺开全部明细），指定 `name` 才看单 skill 详细命中；对常见误报降噪（`subprocess` 单列 medium、凭证词按"文档提及 vs 脚本读取敏感文件"分级） |
+| **v0.1.16** | 当前正式版。新增**安装免责声明确认**：首次安装 skill 前自动提示风险与免责声明，需用户在对话中回复「我确认」、由 AI 调用 `confirm_consent` 记录一次，之后本机安装不再询问（持久化在插件数据目录，升级不丢失）；修复 `audit_skill` 指定 `name` 详查在真实框架下取不到参数的问题；`load_skill` 读取超大 SKILL.md 改为截断防输出爆炸 |
+| v0.1.15 | `audit_skill` 精简为初步筛查：默认只返回每个 skill 的风险等级 + 重点关注清单（不再铺开全部明细），指定 `name` 才看单 skill 详细命中；对常见误报降噪（`subprocess` 单列 medium、凭证词按"文档提及 vs 脚本读取敏感文件"分级） |
 | v0.1.14 | 新增 `audit_skill` 安全审计（初版全量明细，输出过大，v0.1.15 已精简） |
 | v0.1.11 | 修复：大文件确认后不再截断（zip 损坏导致装不上）、支持 `@owner/slug` 双层嵌套 zip、配置布尔严格解析、拒绝 Windows 保留目录名（CON/NUL 等）、SKILL.md 兼容 UTF-8 BOM |
 | v0.1.10 | 修复：skillhub 覆盖不再预删目录（交给 CLI `--force`）、CLI 失败不再被旧目录掩盖、重装同名不再误报失败、namespace 兼容字符串、跳过 WindowsApps 假 python、zip 解压后实际占用复核 |

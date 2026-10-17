@@ -21,6 +21,9 @@ def _make_plugin(target_root: Path) -> SkillCompatPlugin:
     p._skill_dirs = [str(target_root)]
     p._follow_symlinks = True
     p._scan_status = "未扫描"
+    # 存量测试默认视为已确认免责声明；consent 专用测试单独置 False + 覆盖 consent 文件路径
+    p._consent_given = True
+    p._consent_file = None
     return p
 
 
@@ -41,6 +44,96 @@ def _err(result) -> dict:
     assert isinstance(result, dict), result
     assert result.get("is_error") is True, result
     return result
+
+
+# ---------- 安装免责声明确认（consent，仅首次） ----------
+
+def _consent_plugin(target_root: Path, consent_file: Path) -> SkillCompatPlugin:
+    """构造"未确认"实例：consent 文件路径指向临时目录，避免污染真实数据目录。"""
+    p = _make_plugin(target_root)
+    p._consent_given = None
+    p._consent_file = str(consent_file)
+    return p
+
+
+def test_install_requires_consent_first(tmp_path):
+    """首次未确认：install_skill 返回 CONSENT_REQUIRED + 免责声明。"""
+    src = _make_skill(tmp_path, "hello-skill")
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _consent_plugin(target, tmp_path / "consent.json")
+    r = asyncio.run(p.install_skill(source=str(src)))
+    assert r["is_error"] is True and r["error"] == "CONSENT_REQUIRED", r
+    assert "免责" in r["output"] and "确认" in r["output"]
+    # 未确认时绝不能落盘
+    assert not (target / "hello-skill").exists()
+
+
+def test_confirm_consent_then_install_ok(tmp_path):
+    """用户确认后：install_skill 正常执行，consent 持久化到文件。"""
+    src = _make_skill(tmp_path, "hello-skill")
+    target = tmp_path / "root"
+    target.mkdir()
+    consent_file = tmp_path / "consent.json"
+    p = _consent_plugin(target, consent_file)
+    r = asyncio.run(p.confirm_consent())
+    assert isinstance(r, Ok), r
+    assert r.value["consent"] == "given"
+    assert consent_file.is_file()
+    r2 = asyncio.run(p.install_skill(source=str(src)))
+    assert r2["is_error"] is False and r2["output"]["installed"] is True, r2
+    assert (target / "hello-skill" / "SKILL.md").is_file()
+
+
+def test_confirm_consent_idempotent_and_persisted(tmp_path):
+    """重复确认幂等；新实例（重读文件）也视为已确认。"""
+    target = tmp_path / "root"
+    target.mkdir()
+    consent_file = tmp_path / "consent.json"
+    p = _consent_plugin(target, consent_file)
+    assert asyncio.run(p.confirm_consent()).value["consent"] == "given"
+    r2 = asyncio.run(p.confirm_consent())
+    assert isinstance(r2, Ok) and r2.value["consent"] == "already"
+    # 新实例重新读文件：依然已确认
+    p2 = _consent_plugin(target, consent_file)
+    assert p2._load_consent() is True
+    assert asyncio.run(p2.skill_status()).value["consent"].startswith("已确认")
+
+
+def test_skillhub_install_requires_consent_first(tmp_path):
+    """首次未确认：skillhub_install 同样被免责声明拦截。"""
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _consent_plugin(target, tmp_path / "consent.json")
+    r = asyncio.run(p.skillhub_install(skill="some-skill", namespace="ns"))
+    assert isinstance(r, Err), r
+    assert "免责" in str(r.error) and "确认" in str(r.error)
+
+
+def test_consent_corrupt_file_treated_unconfirmed(tmp_path):
+    """consent 文件损坏/格式错误 → 视为未确认，安装被拦。"""
+    target = tmp_path / "root"
+    target.mkdir()
+    consent_file = tmp_path / "consent.json"
+    consent_file.write_text("{not-json", encoding="utf-8")
+    p = _consent_plugin(target, consent_file)
+    assert p._load_consent() is False
+    r = asyncio.run(p.install_skill(source=str(_make_skill(tmp_path, "x-skill"))))
+    assert r["is_error"] is True and r["error"] == "CONSENT_REQUIRED"
+
+
+def test_audit_skill_name_via_parameters(tmp_path):
+    """audit_skill 的 name 应能通过 _['parameters'] 传入（真实框架传参形态）。"""
+    d = tmp_path / "skills" / "clean-skill"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        "---\nname: clean-skill\ndescription: ok\n---\n纯文本说明。\n", encoding="utf-8")
+    p = _audit_plugin(tmp_path / "skills")
+    p._idx = {"c": _idx_item(d, "clean-skill")}
+    r = asyncio.run(p.audit_skill(**{"parameters": {"name": "clean-skill"}}))
+    assert isinstance(r, Ok), r
+    assert r.value["detailed"] is True
+    assert r.value["result"]["name"] == "clean-skill"
 
 
 # ---------- _safe_name ----------
@@ -718,7 +811,7 @@ def test_skillhub_install_reexists_ok(tmp_path, monkeypatch):
     target.mkdir()
     p = _make_plugin(target)
     _make_skill(target, "test")
-    _fake_scan(p)  # 预置索引（total=1）
+    asyncio.run(_fake_scan(p))  # 预置索引（total=1）
 
     async def fake_run(self, args, timeout=180):
         # CLI --force 覆盖成功：目录仍在
