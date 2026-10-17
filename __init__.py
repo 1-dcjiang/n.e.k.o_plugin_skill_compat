@@ -8,6 +8,7 @@
 - 索引以 path 为主键（name 可重复，不覆盖丢失）；按 name 查找时遍历索引
 """
 import asyncio
+import gzip
 import http.client
 import ipaddress
 import os
@@ -70,6 +71,15 @@ def parse_frontmatter(text):
         if m:
             fm[m.group(1)] = m.group(2).strip().strip('"\'')
     return fm
+
+
+def _as_bool(v) -> bool:
+    """严格布尔解析：字符串 'false'/'0'/'no' 不会被误判为 True。"""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
 
 
 def _safe_name(s):
@@ -141,10 +151,12 @@ def _download_url_with_redirects(url, max_bytes: int, confirm_large: bool = Fals
             raise ValueError(f"下载目标不安全，已拒绝: {current}")
         try:
             p = urllib.parse.urlparse(current)
-        except Exception:
-            raise ValueError(f"无法解析下载 URL: {current}")
-        host = p.hostname or ""
-        port = p.port or (443 if p.scheme == "https" else 80)
+            host = p.hostname or ""
+            port = p.port
+        except (ValueError, AttributeError):
+            # urlparse 本身不抛，但访问 .port 时非法端口（:abc/:99999）会抛 ValueError
+            raise ValueError(f"无法解析下载 URL（端口非法）: {current}")
+        port = port or (443 if p.scheme == "https" else 80)
         path = (p.path or "/") + (("?" + p.query) if p.query else "")
         try:
             if p.scheme == "https":
@@ -152,9 +164,10 @@ def _download_url_with_redirects(url, max_bytes: int, confirm_large: bool = Fals
             else:
                 conn = http.client.HTTPConnection(host, port, timeout=60)
             conn.request("GET", path, headers={
-                "User-Agent": "N.E.K.O-skill_compat/0.1.4",
+                "User-Agent": "N.E.K.O-skill_compat/0.1.5",
                 "Connection": "close",
                 "Accept": "application/zip,application/octet-stream,*/*",
+                "Accept-Encoding": "identity",
             })
             resp = conn.getresponse()
         except (ssl.SSLError, OSError, http.client.HTTPException) as e:
@@ -191,6 +204,13 @@ def _download_url_with_redirects(url, max_bytes: int, confirm_large: bool = Fals
             conn.close()
             raise ValueError(f"下载中断: {e}。下一步：重试或改用本地路径导入。")
         conn.close()
+        # 部分 CDN 对 .zip 返回 gzip 编码：解压后再交给调用方（解压后超限由调用方检查）
+        enc = (resp.getheader("Content-Encoding") or "").strip().lower()
+        if enc == "gzip":
+            try:
+                data = gzip.decompress(data)
+            except OSError:
+                raise ValueError("下载内容 gzip 解压失败。下一步：手动下载后提供本地路径。")
         return data
     raise ValueError(f"重定向次数过多，已拒绝: {url}")
 
@@ -214,13 +234,16 @@ class SkillCompatPlugin(NekoPluginBase):
 
     @lifecycle(id="startup")
     async def on_startup(self, **_):
-        """启动：快速返回 ready，耗时扫描放后台。"""
-        cfg = await self.config.dump()
-        settings = cfg.get("settings", {}) or {}
-        dirs = settings.get("skill_dirs")
-        if isinstance(dirs, list) and dirs:
-            self._skill_dirs = [str(d) for d in dirs]
-        self._follow_symlinks = bool(settings.get("follow_symlinks", True))
+        """启动：快速返回 ready，耗时扫描放后台。配置读取失败时回退默认值，不让插件启动失败。"""
+        try:
+            cfg = await self.config.dump()
+            settings = cfg.get("settings", {}) or {}
+            dirs = settings.get("skill_dirs")
+            if isinstance(dirs, list) and dirs:
+                self._skill_dirs = [str(d) for d in dirs]
+            self._follow_symlinks = bool(settings.get("follow_symlinks", True))
+        except Exception:
+            self.logger.warning("skill_compat: 读取配置失败，使用默认 skill_dirs")
         # 耗时扫描放后台，避免 10 秒超时；异常经 done_callback 落日志不静默丢失
         task = asyncio.create_task(self._scan_all())
         task.add_done_callback(self._on_scan_done)
@@ -251,15 +274,17 @@ class SkillCompatPlugin(NekoPluginBase):
     # ══════════ 内部：扫描与索引 ══════════
 
     async def _scan_all(self):
+        """全量扫描并以磁盘为准重建索引（删除/覆盖后旧条目不残留）。"""
+        rebuilt = {}
         for root in self._skill_dirs:
             if not os.path.isdir(root):
                 continue
             found = await asyncio.to_thread(self._scan_dir, root)
-            with self._lock:
-                for info in found:
-                    # 以 path 为主键（name 可重复，不覆盖丢失）
-                    self._idx[info["path"]] = info
+            for info in found:
+                rebuilt[info["path"]] = info
         with self._lock:
+            self._idx.clear()
+            self._idx.update(rebuilt)
             total = len(self._idx)
         self._scan_status = f"已加载 {total} 个 skill"
         try:
@@ -352,6 +377,8 @@ class SkillCompatPlugin(NekoPluginBase):
         await self._ensure_scan()
         with self._lock:
             items = list(self._idx.values())
+        # 过滤已被删除/移动的失效条目（不触发全量重扫，轻量校验）
+        items = [s for s in items if os.path.isdir(s['path'])]
         if keyword:
             items = [s for s in items
                      if keyword in (s.get('name') or '').lower()
@@ -381,6 +408,11 @@ class SkillCompatPlugin(NekoPluginBase):
             similar = [n for n in names if n.lower().startswith(name.lower())][:3]
             hint = f"你是否想找: {similar}" if similar else "请先调 list_skills 查看可用名称"
             return Err(SdkError(f"找不到 skill「{name}」。{hint}"))
+        # 索引条目可能已失效（skill 目录被删除/移动）：给出明确提示并从索引移除
+        if not os.path.isdir(info['path']):
+            with self._lock:
+                self._idx.pop(info['path'], None)
+            return Err(SdkError(f"skill「{name}」的目录已不存在: {info['path']}。它可能已被移动或删除，请让 AI 重新扫描后重试。"))
         # 文件读取放锁外
         content = await asyncio.to_thread(self._read_skill, info['path'])
         return Ok({"name": name, "path": info['path'], "content": content})
@@ -398,7 +430,7 @@ class SkillCompatPlugin(NekoPluginBase):
             return Err(SdkError("缺少搜索关键词 query。"))
         await self._ensure_scan()
         with self._lock:
-            items = list(self._idx.values())
+            items = [s for s in self._idx.values() if os.path.isdir(s['path'])]
         hits = []
         for s in items:
             hay = ((s.get('name') or '') + ' ' + (s.get('description') or '')).lower()
@@ -428,9 +460,10 @@ class SkillCompatPlugin(NekoPluginBase):
     def _read_skill(self, path):
         smd = os.path.join(path, 'SKILL.md')
         try:
-            return open(smd, encoding='utf-8').read()
+            with open(smd, encoding='utf-8') as f:
+                return f.read()
         except Exception as e:
-            return f"(读取失败: {e})"
+            return f"(SKILL.md 读取失败: {e}。该 skill 可能已被移动或删除，可让 AI 重新扫描后重试)"
 
     # ══════════ LLM 工具：AI 自主安装 skill ══════════
 
@@ -449,8 +482,8 @@ class SkillCompatPlugin(NekoPluginBase):
         params = _.get('parameters') or {}
         source = source or params.get('source')
         name = name or params.get('name') or ''
-        overwrite = overwrite or bool(params.get('overwrite', False))
-        confirm_large = confirm_large or bool(params.get('confirm_large', False))
+        overwrite = _as_bool(overwrite) or _as_bool(params.get('overwrite', False))
+        confirm_large = _as_bool(confirm_large) or _as_bool(params.get('confirm_large', False))
         source = (source or '').strip()
         if not source:
             return {"output": "缺少参数 source。请提供要安装的 skill 来源：本地目录路径、本地 .zip 路径或 https 下载链接。",
@@ -482,8 +515,13 @@ class SkillCompatPlugin(NekoPluginBase):
                             "is_error": True, "error": "ALREADY_EXISTS"}
                 await asyncio.to_thread(shutil.rmtree, target, ignore_errors=True)
             await asyncio.to_thread(shutil.copytree, staging, target)
-            # 刷新索引，让新 skill 立即可被 list/load/search 使用
-            await self._scan_all()
+            # 刷新索引，让新 skill 立即可被 list/load/search 使用；
+            # 扫描失败不影响安装结果（下次查询会惰性补扫）
+            try:
+                await self._scan_all()
+            except Exception:
+                with self._lock:
+                    self._scan_status = "未扫描"
             info = self._find_by_name(dir_name) or {}
             return {
                 "output": {

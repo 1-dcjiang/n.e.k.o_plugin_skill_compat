@@ -1,12 +1,15 @@
 """install_skill（AI 自主安装 skill）逻辑与安全测试。"""
 import asyncio
+import gzip
 import http.server
+import shutil
 import threading
 import zipfile
 from pathlib import Path
 
 import plugin.plugins.skill_compat as sc
-from plugin.plugins.skill_compat import SkillCompatPlugin, _safe_name
+from plugin.plugins.skill_compat import SkillCompatPlugin, _as_bool, _safe_name
+from plugin.sdk.plugin import Err, Ok
 
 
 def _make_plugin(target_root: Path) -> SkillCompatPlugin:
@@ -286,6 +289,111 @@ def test_zip_drive_letter_entry_rejected(tmp_path):
     result = _err(asyncio.run(p.install_skill(source=str(zpath))))
     assert "盘符" in result["output"]
     assert not (target / "evil").exists()
+
+
+# ---------- 可靠性：布尔解析 / gzip / 索引重建 ----------
+
+def test_as_bool_string_forms():
+    assert _as_bool(True) is True
+    assert _as_bool(False) is False
+    assert _as_bool("true") is True
+    assert _as_bool("1") is True
+    assert _as_bool("false") is False
+    assert _as_bool("0") is False
+    assert _as_bool("no") is False
+    assert _as_bool("") is False
+
+
+def test_overwrite_string_false_does_not_overwrite(tmp_path):
+    """LLM 若把 overwrite 传成字符串 'false'，不得被 bool() 误判为 True 而覆盖。"""
+    src = _make_skill(tmp_path, "hello-skill")
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+    assert _ok(asyncio.run(p.install_skill(source=str(src))))
+    result = _err(asyncio.run(p.install_skill(source=str(src), overwrite="false")))
+    assert "已存在" in result["output"]
+
+
+def test_download_gzip_decoded(tmp_path, monkeypatch):
+    """CDN 返回 Content-Encoding: gzip 的 zip 时应解压后返回 PK 数据。"""
+    zip_bytes = b"PK\x03\x04" + b"fake-zip-body"
+
+    class _GzipHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = gzip.compress(zip_bytes)
+            self.send_response(200)
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _GzipHandler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    monkeypatch.setattr(sc, "_url_safe", lambda u: True)
+    try:
+        data = sc._download_url_with_redirects(
+            f"http://localhost:{srv.server_port}/skill.zip", 1024, False)
+        assert data == zip_bytes
+    finally:
+        srv.shutdown()
+        t.join()
+
+
+def test_invalid_port_url_rejected_cleanly():
+    """非法端口 URL（:abc）不得导致裸异常，应返回友好错误。"""
+    import pytest
+
+    with pytest.raises(ValueError, match="端口非法"):
+        sc._download_url_with_redirects("https://example.com:abc/x.zip", 1024, False)
+
+
+def test_scan_rebuilds_index_after_delete(tmp_path):
+    """skill 目录被删除后重新扫描，索引不应残留失效条目。"""
+    src = _make_skill(tmp_path, "gone-skill")
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+    assert _ok(asyncio.run(p.install_skill(source=str(src))))
+    assert any("gone-skill" in k for k in p._idx)
+    shutil.rmtree(target / "gone-skill")
+    asyncio.run(p._scan_all())
+    assert not any("gone-skill" in k for k in p._idx)
+    assert p._scan_status.startswith("已加载")
+
+
+def test_list_filters_deleted_skill_without_rescan(tmp_path):
+    """目录被删除后（不重扫）list_skills 不应再返回失效条目。"""
+    src = _make_skill(tmp_path, "doomed-skill")
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+    assert _ok(asyncio.run(p.install_skill(source=str(src))))
+    # 删除磁盘目录，但保持索引状态为"已扫描"（模拟外部删除后直接查询）
+    shutil.rmtree(target / "doomed-skill")
+    p._scan_status = "已加载 1 个 skill"
+    res = asyncio.run(p.list_skills())
+    assert isinstance(res, Ok)
+    assert all("doomed-skill" not in (s["name"] or "") for s in res.value["skills"])
+
+
+def test_load_skill_removed_entry_hint(tmp_path):
+    """load 一个目录已被删除的 skill 时应给出提示并从索引移除。"""
+    src = _make_skill(tmp_path, "vanished-skill")
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+    assert _ok(asyncio.run(p.install_skill(source=str(src))))
+    shutil.rmtree(target / "vanished-skill")
+    p._scan_status = "已加载 1 个 skill"
+    result = asyncio.run(p.load_skill(name="vanished-skill"))
+    assert isinstance(result, Err)
+    assert "已不存在" in str(result.error)
+    assert not any("vanished-skill" in k for k in p._idx)
 
 
 def test_install_https_zip_fails_on_unreachable(tmp_path):
