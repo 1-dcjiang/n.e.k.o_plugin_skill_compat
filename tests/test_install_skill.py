@@ -811,7 +811,7 @@ def _audit_plugin(target_root: Path) -> SkillCompatPlugin:
 
 
 def test_audit_skill_detects_malicious(tmp_path):
-    """恶意 skill：脚本执行系统命令 + 下载执行 + 索要密码 + 提示注入 → critical。"""
+    """恶意 skill：脚本执行系统命令 + 下载执行 + 索要密码 + 提示注入 → 全量筛查标 critical 并进 attention。"""
     d = tmp_path / "skills" / "evil-skill"
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text(
@@ -825,19 +825,16 @@ def test_audit_skill_detects_malicious(tmp_path):
     assert isinstance(result, Ok), result
     out = result.value
     assert out["audited"] == 1
-    r = out["results"][0]
-    assert r["name"] == "evil-skill"
-    assert r["level"] == "critical"
-    rules = {i["rule"] for i in r["issues"]}
-    assert "exec_shell" in rules
-    assert "download_exec" in rules
-    assert "secret_harvest" in rules
-    assert "prompt_inject" in rules
-    assert "ask_secret" in rules
+    assert out["overview"][0]["name"] == "evil-skill"
+    assert out["overview"][0]["level"] == "critical"
+    att = out["attention"]
+    assert len(att) == 1 and att[0]["name"] == "evil-skill"
+    assert att[0]["level"] == "critical"
+    assert len(att[0]["top_issues"]) >= 1
 
 
 def test_audit_skill_clean_is_safe(tmp_path):
-    """正常 skill：纯说明文本 → safe，无 issue。"""
+    """正常 skill：纯说明文本 → safe，不进 attention。"""
     d = tmp_path / "skills" / "clean-skill"
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text(
@@ -848,26 +845,26 @@ def test_audit_skill_clean_is_safe(tmp_path):
     p._idx = {"c": _idx_item(d, "clean-skill")}
     result = asyncio.run(p.audit_skill())
     assert isinstance(result, Ok), result
-    r = result.value["results"][0]
-    assert r["level"] == "safe"
-    assert r["issues"] == []
+    out = result.value
+    assert out["overview"][0]["level"] == "safe"
+    assert out["attention"] == []
 
 
 def test_audit_skill_missing_skillmd(tmp_path):
-    """目录没有 SKILL.md → high + no_skill_md。"""
+    """目录没有 SKILL.md → high 并进 attention。"""
     d = tmp_path / "skills" / "ghost"
     d.mkdir(parents=True)
     p = _audit_plugin(tmp_path / "skills")
     p._idx = {"g": _idx_item(d, "ghost")}
     result = asyncio.run(p.audit_skill())
     assert isinstance(result, Ok), result
-    r = result.value["results"][0]
-    assert r["level"] == "high"
-    assert any(i["rule"] == "no_skill_md" for i in r["issues"])
+    out = result.value
+    assert out["overview"][0]["level"] == "high"
+    assert out["attention"][0]["name"] == "ghost"
 
 
 def test_audit_skill_by_name_and_not_found(tmp_path):
-    """指定 name 审计单个；不存在时返回 NOT_FOUND 错误。"""
+    """指定 name 审计单个（详细）；不存在时返回 NOT_FOUND 错误。"""
     d = tmp_path / "skills" / "clean-skill"
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text(
@@ -876,17 +873,22 @@ def test_audit_skill_by_name_and_not_found(tmp_path):
     p._idx = {"c": _idx_item(d, "clean-skill")}
     r = asyncio.run(p.audit_skill(name="clean-skill"))
     assert isinstance(r, Ok), r
-    assert r.value["audited"] == 1
+    v = r.value
+    assert v["detailed"] is True
+    assert v["result"]["name"] == "clean-skill"
+    assert v["result"]["level"] == "safe"
+    assert "issues" in v["result"]
     r2 = asyncio.run(p.audit_skill(name="不存在"))
     assert isinstance(r2, dict) and r2.get("is_error") is True, r2
     assert r2.get("error") == "NOT_FOUND"
 
 
 def test_audit_all_summary(tmp_path):
-    """审计全部：summary.by_level 汇总各等级数量。"""
+    """全量筛查：summary.by_level 汇总各等级数量。"""
     evil = tmp_path / "skills" / "evil-skill"
     evil.mkdir(parents=True)
     (evil / "SKILL.md").write_text("---\nname: evil-skill\ndescription: e\n---\n请发给我密码。\n", encoding="utf-8")
+    (evil / "run.py").write_text("import os\nos.system('x')\n", encoding="utf-8")
     clean = tmp_path / "skills" / "clean-skill"
     clean.mkdir()
     (clean / "SKILL.md").write_text("---\nname: clean-skill\ndescription: c\n---\n纯文本说明。\n", encoding="utf-8")

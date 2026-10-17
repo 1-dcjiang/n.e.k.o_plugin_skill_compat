@@ -55,8 +55,9 @@ _MAX_ARCHIVE_ENTRIES = 5000
 _SKILLHUB_ITEM_RE = re.compile(r'^\s*(?:@([^\s/]+)/)?([^\s/]+)\s+(.+)$')
 
 # ---------- skill 安全审计规则（静态文本匹配，只读不执行） ----------
-# 每项: (rule_id, 级别, 标签, 正则, 提示)。级别: low/medium/high/critical。
-# 注意: 这是启发式静态审计，会有误报，输出明确标注"供人工确认"。
+# 每项: (rule_id, 级别, 标签, 正则, 提示, only_scripts)。
+# only_scripts=True 的规则只在脚本文件中生效（SKILL.md 说明文字跳过，避免误报）。
+# 级别: low/medium/high/critical。启发式静态审计会有误报，输出明确标注"供人工确认"。
 _AUDIT_SCRIPT_EXTS = {'.py', '.sh', '.ps1', '.js', '.bat', '.cmd', '.rb', '.pl', '.lua'}
 _AUDIT_MAX_SCRIPT_BYTES = 1_000_000
 _AUDIT_MAX_SCRIPTS = 100
@@ -64,42 +65,50 @@ _AUDIT_MAX_FILES = 3000
 _AUDIT_MAX_TOTAL_BYTES = 60 * 1024 * 1024
 
 AUDIT_RULES = [
-    # 脚本直接执行系统命令
+    # 脚本直接执行系统命令（不含 subprocess——它是常见正常库，单独 medium 提示）
     ("exec_shell", "critical", "脚本直接执行系统命令",
-     re.compile(r'(?i)\b(os\.system|os\.popen|subprocess\b|Popen|eval\s*\(|exec\s*\(|os\.exec|commands\.getoutput|Invoke-Expression|\bIEX\b|Start-Process)\b'),
-     "脚本包含直接执行系统命令/代码的调用，运行时会执行任意命令"),
+     re.compile(r'(?i)\b(os\.system|os\.popen|Popen|eval\s*\(|exec\s*\(|os\.exec|commands\.getoutput|Invoke-Expression|\bIEX\b|Start-Process)\b'),
+     "脚本包含直接执行系统命令/代码的调用，运行时会执行任意命令", False),
     # 下载并立即执行
     ("download_exec", "critical", "下载内容并直接执行",
      re.compile(r'(?i)(curl|wget|iwr|Invoke-WebRequest|Invoke-RestMethod)\s+[^\r\n]{0,160}\|\s*(ba|pw)?sh\b|(curl|wget)\s+[^\r\n]{0,160}\s+-o\s+[^\r\n]{0,60}\.(py|sh|ps1)\s*[;&]'),
-     "从网络下载内容后直接执行或保存为脚本，可能运行不可信代码"),
-    # 索要/读取敏感凭证（脚本与正文均适用）
-    ("secret_harvest", "critical", "涉及敏感凭证",
-     re.compile(r'(?i)\b(password|passwd|api[_-]?key|secret|token|credentials?|id_rsa|private[_-]?key|\.aws\b|\.ssh\b|wallet|mnemonic|seed[_-]?phrase)\b|(密码|私钥|密钥|支付密码|验证码|银行卡号|身份证号|助记词)'),
-     "出现敏感凭证相关字眼，请确认是否要求用户提供或读取私密信息"),
+     "从网络下载内容后直接执行或保存为脚本，可能运行不可信代码", False),
+    # 脚本读取敏感文件/密钥（只在脚本中生效）
+    ("read_secret_file", "critical", "脚本读取敏感文件",
+     re.compile(r'(?i)(\.ssh[/\\]|id_rsa|\.aws[/\\]|credentials\.(json|ini|txt)|\.env\b|wallet|mnemonic|seed[-_ ]?phrase|私钥|助记词)'),
+     "脚本可能读取 SSH 私钥/AWS 凭证/.env 等敏感文件", True),
+    # 任意文本出现敏感凭证词（文档提及也可能是配置说明，medium 供确认）
+    ("secret_harvest", "medium", "涉及敏感凭证字眼",
+     re.compile(r'(?i)\b(password|passwd|api[_-]?key|secret|token|credentials?)\b|(密码|支付密码|验证码|银行卡号|身份证号|私钥|密钥|助记词)'),
+     "出现敏感凭证相关字眼，请确认是正常配置说明还是要求提供/读取私密信息", False),
     # 数据外传
     ("exfil", "high", "数据外传",
      re.compile(r'(?i)(发送|上传|提交|传回|外传|post|upload)[^\r\n]{0,60}(到|至|给|to)[^\r\n]{0,90}(http|服务器|server|邮箱|api|接口|url|endpoint)'),
-     "可能把本地数据（聊天记录/文件/密码等）发送到外部"),
+     "可能把本地数据（聊天记录/文件/密码等）发送到外部", False),
     # 提示注入特征
     ("prompt_inject", "high", "提示注入特征",
      re.compile(r'(?i)(ignore\s+(previous|prior|above|earlier)\s+(instructions|prompts|rules)|忽略[^\r\n]{0,24}(之前|以上|先前)[^\r\n]{0,12}(指令|提示|规则)|disregard\s+(previous|prior|above)|you\s+are\s+now\s+(free|unconstrained|a\s+new)|输出你的[^\r\n]{0,30}(系统|system)[^\r\n]{0,20}(提示|指令|prompt)|print[^\r\n]{0,40}(system\s+prompt|系统提示|你的指令))'),
-     "存在试图操纵 AI 行为或套取系统提示词的文本，安装前请谨慎"),
+     "存在试图操纵 AI 行为或套取系统提示词的文本，安装前请谨慎", False),
     # 要求用户提供敏感信息（钓鱼特征）
     ("ask_secret", "high", "要求用户提供敏感信息",
      re.compile(r'(?i)(请|麻烦|需要|让我|please)[^\r\n]{0,30}(输入|提供|告诉我|发给我|给我|给我发)[^\r\n]{0,50}(密码|验证码|token|api[_-]?key|密钥|私钥|银行卡|支付|口令|账号密码)'),
-     "要求用户提供敏感信息，可能是钓鱼/社工"),
+     "要求用户提供敏感信息，可能是钓鱼/社工", False),
     # 脚本包含网络请求
     ("net_in_script", "medium", "脚本含网络访问",
      re.compile(r'(?i)\b(requests\.|urllib|http\.client|socket\.|urlopen|httpx|aiohttp|curl|wget|Invoke-WebRequest|Invoke-RestMethod|ftp\.|smtplib)\b'),
-     "脚本含网络访问，运行时会外联，请确认目标地址可信"),
+     "脚本含网络访问，运行时会外联，请确认目标地址可信", True),
+    # 脚本使用 subprocess（正常库，但会运行命令）
+    ("subprocess_use", "medium", "脚本使用 subprocess",
+     re.compile(r'(?i)\bsubprocess\b|os\.system|os\.popen|Popen'),
+     "脚本会调用系统命令，请确认命令参数可信", True),
     # 正文包含命令示例
-    ("cmd_hint", "medium", "正文含命令/安装示例",
+    ("cmd_hint", "low", "正文含命令/安装示例",
      re.compile(r'(?i)\b(curl|wget|npm\s+install|pip\s+install|git\s+clone|rm\s+-rf|sudo|chmod\s+777|powershell|cmd\s+/c|bash\s|sh\s|\.\\|docker\s+(run|exec))\b'),
-     "SKILL.md 中出现命令示例，请确认是使用说明还是诱导执行"),
+     "SKILL.md 中出现命令示例，请确认是使用说明还是诱导执行", False),
     # 可疑外部链接
     ("suspicious_link", "low", "可疑外部链接",
      re.compile(r'(?i)https?://[^\s"\'<>)\]]+\.(zip|exe|msi|scr|bat|ps1)\b|\b(bit\.ly|t\.cn|goo\.gl|tinyurl\.com|is\.gd)\b'),
-     "存在指向可执行/压缩包下载或短链的链接，需人工确认"),
+     "存在指向可执行/压缩包下载或短链的链接，需人工确认", False),
 ]
 
 # 级别排序（用于取最高风险）
@@ -611,43 +620,70 @@ class SkillCompatPlugin(NekoPluginBase):
 
     @llm_tool(
         name="audit_skill",
-        description="对 skill 做静态安全审计（只读、不执行任何内容、不联网）。何时用：用户说'检查/审计/看看 XX skill 安不安全'、或在安装前后想确认 skill 有无风险。name 可选：指定审计单个 skill（用 list_skills 查名称）；不填则审计全部已加载 skill。返回每个 skill 的风险等级（safe/low/medium/high/critical）、命中风险点（危险命令/敏感凭证/数据外传/提示注入/可疑链接等）。限制：这是启发式静态文本匹配，会有误报，结果供人工确认，不替代人工审查。",
-        parameters={"type": "object", "properties": {"name": {"type": "string", "description": "可选，要审计的 skill 名称；缺省审计全部"}}, "required": []},
+        description="对 skill 做初步安全筛查（只读、不执行任何内容、不联网）。何时用：用户说'检查/审计/看看 XX skill 安不安全'、或在安装前后想快速确认 skill 有无风险。name 可选：指定单个 skill（用 list_skills 查名称）看详细命中；不填则对全部已加载 skill 做初步筛查，只返回每个 skill 的风险等级（safe/low/medium/high/critical）和需要重点关注的清单，便于一眼掌握。限制：启发式静态文本匹配，可能有误报，结果供人工确认，不替代人工审查。",
+        parameters={"type": "object", "properties": {"name": {"type": "string", "description": "可选，指定要详细审计的 skill 名称；缺省为全量初步筛查"}}, "required": []},
         timeout=120.0,
     )
     async def audit_skill(self, *, name: str = "", **_):
         await self._ensure_scan()
         with self._lock:
             items = list(self._idx.values())
+        # 指定单个 skill → 详细审计
         if name:
             name = str(name).strip()
             target = self._find_by_name(name)
             if not target:
                 return {"output": f"未找到名为 '{name}' 的 skill。下一步：用 list_skills 查看已加载列表，或用 install_skill 先安装。",
                         "is_error": True, "error": "NOT_FOUND"}
-            items = [target]
-        results = []
+            report = await asyncio.to_thread(self._audit_skill_dir, target)
+            return Ok({
+                "audited": 1,
+                "detailed": True,
+                "result": {
+                    "name": report['name'], "path": report['path'],
+                    "kind": report['kind'], "level": report['level'],
+                    "issues": report['issues'],
+                },
+            })
+        # 全量初步筛查：只给等级 + 重点关注，不铺开明细
+        reports = []
         for it in items:
-            report = await asyncio.to_thread(self._audit_skill_dir, it)
-            results.append(report)
+            reports.append(await asyncio.to_thread(self._audit_skill_dir, it))
         by_level = {}
-        for r in results:
+        overview = []
+        attention = []
+        for r in reports:
             lv = r['level']
             by_level[lv] = by_level.get(lv, 0) + 1
+            overview.append({"name": r['name'], "level": lv})
+            if lv in ('high', 'critical'):
+                top = sorted(r['issues'], key=lambda i: _AUDIT_LEVEL_ORDER.get(i['level'], 0), reverse=True)
+                seen = set()
+                top_rules = []
+                for it in top:
+                    if it['rule'] not in seen:
+                        seen.add(it['rule'])
+                        top_rules.append(it['label'])
+                    if len(top_rules) >= 3:
+                        break
+                attention.append({"name": r['name'], "level": lv, "top_issues": top_rules})
         return Ok({
-            "audited": len(results),
+            "audited": len(reports),
             "summary": {
-                "total": len(results),
+                "total": len(reports),
                 "by_level": by_level,
-                "note": "静态启发式审计，可能有误报；critical/high 项安装前请人工确认。",
+                "note": "初步筛查（静态启发式，可能有误报）。对单个 skill 传 name 参数可查看详细命中。",
             },
-            "results": results,
+            "attention": attention,
+            "overview": overview,
         })
 
     def _audit_text(self, text, where):
         """对一段文本跑全部规则，返回命中列表（合并重复规则）。"""
         hits = []
-        for rule_id, level, label, pat, hint in AUDIT_RULES:
+        for rule_id, level, label, pat, hint, only_scripts in AUDIT_RULES:
+            if only_scripts and where == 'SKILL.md':
+                continue
             lines = []
             for m in pat.finditer(text):
                 lines.append(text.count('\n', 0, m.start()) + 1)

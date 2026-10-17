@@ -80,7 +80,7 @@ https://market.project-neko.cn/#/plugin/105
 | `load_skill` | 加载指定 skill 的完整 `SKILL.md` 内容 |
 | `search_skills` | 按关键词在 skill 名称与描述中搜索 |
 | `skill_status` | 查看运行状态与兼容性报告（扫描目录、已加载数量、格式问题） |
-| `audit_skill` | **静态安全审计**：检查 skill 内容与脚本中的危险命令、敏感凭证、数据外传、提示注入、可疑链接，给出风险等级（safe/low/medium/high/critical）；只读不执行、不联网 |
+| `audit_skill` | **skill 安全初步筛查**：一键给全部 skill 出风险等级（safe/low/medium/high/critical）与重点关注清单，只读不执行、不联网；指定 `name` 可看单个 skill 的详细命中 |
 
 ---
 
@@ -97,7 +97,7 @@ https://market.project-neko.cn/#/plugin/105
 - **严格参数解析**：布尔参数严格解析（`"false"` 字符串不会再被当成 `True` 覆盖安装）
 - **临时文件清理**：校验或下载失败时自动清理临时目录，不残留垃圾
 - **内容即数据**：skill 内容是数据不是命令，插件不会盲目执行其中的指令
-- **skill 安全审计（v0.1.14+）**：`audit_skill` 工具对 skill 的 SKILL.md 与目录内脚本做静态启发式检查（危险命令/下载即执行、敏感凭证、数据外传、提示注入、可疑外链、资源规模），按最高风险项定级；只读不执行、不联网，结果供人工确认
+- **skill 安全审计（v0.1.14+）**：`audit_skill` 对全部 skill 做初步筛查（危险命令/下载即执行、脚本读取敏感文件、数据外传、提示注入、可疑外链、资源规模），输出风险等级与重点关注清单；只读不执行、不联网，结果供人工确认；指定 `name` 看单 skill 详细命中
 
 ---
 
@@ -113,7 +113,7 @@ https://market.project-neko.cn/#/plugin/105
 
 | 版本 | 要点 |
 |---|---|
-| **v0.1.14** | 当前正式版。新增 `audit_skill` 安全审计工具：静态检查 skill 内容与脚本（危险命令/下载即执行、敏感凭证、数据外传、提示注入、可疑链接、资源规模），输出风险等级与命中项；只读不执行、不联网 |
+| **v0.1.14** | 当前正式版。新增 `audit_skill` 安全初步筛查：一键给全部 skill 出风险等级与重点关注清单（只读不执行、不联网）；对常见误报降噪（`subprocess`/凭证词按文档提及 vs 脚本读取分级）；指定 `name` 可看单个 skill 详细命中 |
 | v0.1.13 | 修复 UI 面板：移除 TSX 中对 `react` 的裸导入（surface iframe 无法解析），全部改用官方 `@neko/plugin-ui`；补齐 `@ui.context(id="skills")` 与 plugin.toml 面板 context 配对 |
 | v0.1.11 | 修复：大文件确认后不再截断（zip 损坏导致装不上）、支持 `@owner/slug` 双层嵌套 zip、配置布尔严格解析、拒绝 Windows 保留目录名（CON/NUL 等）、SKILL.md 兼容 UTF-8 BOM |
 | v0.1.10 | 修复：skillhub 覆盖不再预删目录（交给 CLI `--force`）、CLI 失败不再被旧目录掩盖、重装同名不再误报失败、namespace 兼容字符串、跳过 WindowsApps 假 python、zip 解压后实际占用复核 |
