@@ -165,7 +165,7 @@ def _download_url_with_redirects(url, max_bytes: int, confirm_large: bool = Fals
             else:
                 conn = http.client.HTTPConnection(host, port, timeout=60)
             conn.request("GET", path, headers={
-                "User-Agent": "N.E.K.O-skill_compat/0.1.7",
+                "User-Agent": "N.E.K.O-skill_compat/0.1.8",
                 "Connection": "close",
                 "Accept": "application/zip,application/octet-stream,*/*",
                 "Accept-Encoding": "identity",
