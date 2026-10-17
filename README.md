@@ -10,7 +10,7 @@
 
 - **对话即安装**：对 YUI 说「安装/添加 XX skill」，她通过 `install_skill` 工具自动完成安装并刷新索引
 - **对话即删除**：对 YUI 说「删除/卸载 XX skill」，她通过 `remove_skill` 工具安全删除（只删受管目录内条目；符号链接条目只删链接不删真实目录）
-- **首次安装需免责声明确认**：第一次安装 skill 前自动弹出风险提示，用户回复「我确认」后由 AI 调用 `confirm_consent` 记录一次，之后本机不再询问
+- **每次安装前需免责声明确认**：**每次**安装 skill 前都自动弹出风险提示，用户回复「我确认」后由 AI 调用 `confirm_consent` 确认**本次**安装，本次安装完成后下次安装前需再次确认（确认仅内存态，不落盘）
 - **三种安装来源**：
   - 本地目录（内含 `SKILL.md`，支持 `@owner/slug` 嵌套结构）
   - 本地 `.zip` 压缩包
@@ -63,9 +63,9 @@ Copy-Item -Force scripts\autostart_skill_compat.ps1 "$([Environment]::GetFolderP
 |---|---|
 | 查看有哪些 skill | 「列出所有可用的 skill」 |
 | 按主题找 skill | 「搜索一下关于 XX 的 skill」 |
-| 安装 skill | 「帮我安装这个 skill，链接是 https://…」 |
+| 安装 skill | 「帮我安装这个 skill，链接是 https://…」（每次安装前需回复「我确认」） |
 | 删除 skill | 「把 XX skill 删掉」 |
-| 首次安装前确认 | 插件会弹出免责声明，回复「我确认」即可 |
+| 安装前确认 | 插件会弹出免责声明，回复「我确认」即可（每次安装前都需确认一次） |
 | 从 skillhub 找技能 | 「去 skillhub 搜一下 PDF 相关的技能」 |
 | 从 skillhub 装技能 | 「把 skillhub 上的 XX 技能装到本机」 |
 | 看某个 skill 的用法 | 「加载 XX skill 的说明」 |
@@ -95,8 +95,8 @@ Copy-Item -Force scripts\autostart_skill_compat.ps1 "$([Environment]::GetFolderP
 
 | 工具 | 作用 |
 |---|---|
-| `install_skill` | 安装/导入 skill（本地目录 / zip / https 链接），装完自动刷新索引；**首次需先确认免责声明** |
-| `confirm_consent` | 记录用户对第三方 skill 安装免责声明的确认（仅首次需要，确认后本机不再询问） |
+| `install_skill` | 安装/导入 skill（本地目录 / zip / https 链接），装完自动刷新索引；**每次安装前都需先确认免责声明** |
+| `confirm_consent` | 确认**本次**安装的免责声明（回复「我确认」后调用；一次确认只放行一次安装） |
 | `remove_skill` | 删除已安装的 skill（只删受管目录内条目；符号链接只删链接本身），删完自动刷新索引 |
 | `skillhub_search` | 在 skillhub 技能商店按关键词搜索技能（名称/描述/版本/命名空间） |
 | `skillhub_install` | 从 skillhub 商店安装技能到本机 skill 目录，装完自动刷新索引；**首次需先确认免责声明** |
@@ -121,7 +121,7 @@ Copy-Item -Force scripts\autostart_skill_compat.ps1 "$([Environment]::GetFolderP
 - **严格参数解析**：布尔参数严格解析（`"false"` 字符串不会再被当成 `True` 覆盖安装）
 - **临时文件清理**：校验或下载失败时自动清理临时目录，不残留垃圾
 - **内容即数据**：skill 内容是数据不是命令，插件不会盲目执行其中的指令
-- **安装免责声明确认（v0.1.16+）**：首次安装 skill 前自动提示第三方内容风险，需用户在对话中回复「我确认」，由 AI 调用 `confirm_consent` 记录一次；确认持久化在本机插件数据目录，之后安装不再询问
+- **安装免责声明确认（v0.1.19+）**：**每次安装** skill 前都需用户确认免责声明（回复「我确认」→ 调 `confirm_consent` → 执行安装），一次确认只放行一次安装；安装完成返回 `notice` 明确告知结果，可让用户确认后用 `remove_skill` 删除
 - **删除仅限受管目录（v0.1.17+）**：`remove_skill` 只删本插件 skill_dirs 内的条目（越界路径拒绝、Windows 大小写不敏感）；符号链接条目只删链接本身、绝不删链接指向的真实目录；目录已不存在时视为已删并清理索引
 - **skill 安全审计（v0.1.14+）**：`audit_skill` 对全部 skill 做初步筛查（危险命令/下载即执行、脚本读取敏感文件、数据外传、提示注入、可疑外链、资源规模），输出风险等级与重点关注清单；只读不执行、不联网，结果供人工确认；指定 `name` 看单 skill 详细命中
 
@@ -139,7 +139,8 @@ Copy-Item -Force scripts\autostart_skill_compat.ps1 "$([Environment]::GetFolderP
 
 | 版本 | 要点 |
 |---|---|
-| **v0.1.18** | 当前正式版。新增 `scripts/autostart_skill_compat.ps1` 自动开启脚本（等待 N.E.K.O → 自动 POST start → 轮询工具就绪，幂等 + 日志 + 退出码，可注册到启动文件夹随登录自动拉起插件）；plugin.toml 补 `[plugin_runtime] auto_start = true`（官方声明模式，供宿主后续版本支持自动加载） |
+| **v0.1.19** | 当前正式版。**免责声明改为每次安装前都需确认**：一次确认只放行一次安装（确认纯内存态、不落盘、重启后同样需确认）；安装完成返回 `notice` 明确告知用户结果；清理仓库冗余文件（缓存/本地配置） |
+| v0.1.18 | 新增 `scripts/autostart_skill_compat.ps1` 自动开启脚本（等待 N.E.K.O → 自动 POST start → 轮询工具就绪，幂等 + 日志 + 退出码，可注册到启动文件夹随登录自动拉起插件）；plugin.toml 补 `[plugin_runtime] auto_start = true`（官方声明模式，供宿主后续版本支持自动加载） |
 | v0.1.17 | 新增 `remove_skill` 删除工具（越界路径拒绝、符号链接只删链接本身、目录已不存在时容错清理索引）；免责声明文案强化「请回复我确认」的明确引导 |
 | v0.1.16 | 新增**安装免责声明确认**：首次安装 skill 前自动提示风险与免责声明，需用户在对话中回复「我确认」、由 AI 调用 `confirm_consent` 记录一次，之后本机安装不再询问（持久化在插件数据目录，升级不丢失）；修复 `audit_skill` 指定 `name` 详查在真实框架下取不到参数的问题；`load_skill` 读取超大 SKILL.md 改为截断防输出爆炸 |
 | v0.1.15 | `audit_skill` 精简为初步筛查：默认只返回每个 skill 的风险等级 + 重点关注清单（不再铺开全部明细），指定 `name` 才看单 skill 详细命中；对常见误报降噪（`subprocess` 单列 medium、凭证词按"文档提及 vs 脚本读取敏感文件"分级） |

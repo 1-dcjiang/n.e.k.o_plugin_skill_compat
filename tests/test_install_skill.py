@@ -21,9 +21,8 @@ def _make_plugin(target_root: Path) -> SkillCompatPlugin:
     p._skill_dirs = [str(target_root)]
     p._follow_symlinks = True
     p._scan_status = "未扫描"
-    # 存量测试默认视为已确认免责声明；consent 专用测试单独置 False + 覆盖 consent 文件路径
+    # 存量安装测试默认视为"本次已确认"（每个测试只安装一次，确认被消费一次即可）
     p._consent_given = True
-    p._consent_file = None
     return p
 
 
@@ -46,81 +45,86 @@ def _err(result) -> dict:
     return result
 
 
-# ---------- 安装免责声明确认（consent，仅首次） ----------
+# ---------- 安装免责声明确认（consent，每次安装前确认一次） ----------
 
-def _consent_plugin(target_root: Path, consent_file: Path) -> SkillCompatPlugin:
-    """构造"未确认"实例：consent 文件路径指向临时目录，避免污染真实数据目录。"""
+def _consent_plugin(target_root: Path) -> SkillCompatPlugin:
+    """构造"未确认"实例：本次确认标记置 False（纯内存态，无持久化文件）。"""
     p = _make_plugin(target_root)
-    p._consent_given = None
-    p._consent_file = str(consent_file)
+    p._consent_given = False
     return p
 
 
-def test_install_requires_consent_first(tmp_path):
-    """首次未确认：install_skill 返回 CONSENT_REQUIRED + 免责声明（含明确的「我确认」引导）。"""
+def test_install_requires_consent_every_time(tmp_path):
+    """未确认：install_skill 返回 CONSENT_REQUIRED + 免责声明（含「我确认」引导与「每次安装」语义）。"""
     src = _make_skill(tmp_path, "hello-skill")
     target = tmp_path / "root"
     target.mkdir()
-    p = _consent_plugin(target, tmp_path / "consent.json")
+    p = _consent_plugin(target)
     r = asyncio.run(p.install_skill(source=str(src)))
     assert r["is_error"] is True and r["error"] == "CONSENT_REQUIRED", r
     assert "免责" in r["output"] and "确认" in r["output"]
     assert "我确认" in r["output"]
-    # 未确认时绝不能落盘
+    assert "每次安装" in r["output"]
+    # 未确认时绝不能落盘，且确认标记未被消费
     assert not (target / "hello-skill").exists()
+    assert p._consent_given is False
 
 
 def test_confirm_consent_then_install_ok(tmp_path):
-    """用户确认后：install_skill 正常执行，consent 持久化到文件。"""
+    """用户确认本次后：install_skill 放行并安装成功；返回含安装完成告知 notice。"""
     src = _make_skill(tmp_path, "hello-skill")
     target = tmp_path / "root"
     target.mkdir()
-    consent_file = tmp_path / "consent.json"
-    p = _consent_plugin(target, consent_file)
+    p = _consent_plugin(target)
     r = asyncio.run(p.confirm_consent())
     assert isinstance(r, Ok), r
     assert r.value["consent"] == "given"
-    assert consent_file.is_file()
     r2 = asyncio.run(p.install_skill(source=str(src)))
     assert r2["is_error"] is False and r2["output"]["installed"] is True, r2
+    assert "安装完成" in r2["output"].get("notice", "")
     assert (target / "hello-skill" / "SKILL.md").is_file()
 
 
-def test_confirm_consent_idempotent_and_persisted(tmp_path):
-    """重复确认幂等；新实例（重读文件）也视为已确认。"""
+def test_consent_consumed_after_install(tmp_path):
+    """一次确认只放行一次安装：安装完成后，下次安装前仍需再次确认（每次安装前都要确认）。"""
+    src = _make_skill(tmp_path, "hello-skill")
     target = tmp_path / "root"
     target.mkdir()
-    consent_file = tmp_path / "consent.json"
-    p = _consent_plugin(target, consent_file)
+    p = _consent_plugin(target)
+    assert asyncio.run(p.confirm_consent()).value["consent"] == "given"
+    r1 = asyncio.run(p.install_skill(source=str(src)))
+    assert r1["is_error"] is False and r1["output"]["installed"] is True, r1
+    # 确认已被消费 → 再次安装又被拦
+    r2 = asyncio.run(p.install_skill(source=str(src)))
+    assert r2["is_error"] is True and r2["error"] == "CONSENT_REQUIRED", r2
+    assert p._consent_given is False
+
+
+def test_confirm_consent_idempotent(tmp_path):
+    """本次确认内重复确认 → already，不报错。"""
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _consent_plugin(target)
     assert asyncio.run(p.confirm_consent()).value["consent"] == "given"
     r2 = asyncio.run(p.confirm_consent())
     assert isinstance(r2, Ok) and r2.value["consent"] == "already"
-    # 新实例重新读文件：依然已确认
-    p2 = _consent_plugin(target, consent_file)
-    assert p2._load_consent() is True
-    assert asyncio.run(p2.skill_status()).value["consent"].startswith("已确认")
+    assert p._consent_given is True  # 幂等不消费
 
 
-def test_skillhub_install_requires_consent_first(tmp_path):
-    """首次未确认：skillhub_install 同样被免责声明拦截。"""
+def test_skillhub_install_requires_consent_every_time(tmp_path):
+    """未确认：skillhub_install 同样被免责声明拦截；确认一次后放行，再装又拦。"""
     target = tmp_path / "root"
     target.mkdir()
-    p = _consent_plugin(target, tmp_path / "consent.json")
+    p = _consent_plugin(target)
     r = asyncio.run(p.skillhub_install(skill="some-skill", namespace="ns"))
     assert isinstance(r, Err), r
     assert "免责" in str(r.error) and "确认" in str(r.error)
-
-
-def test_consent_corrupt_file_treated_unconfirmed(tmp_path):
-    """consent 文件损坏/格式错误 → 视为未确认，安装被拦。"""
-    target = tmp_path / "root"
-    target.mkdir()
-    consent_file = tmp_path / "consent.json"
-    consent_file.write_text("{not-json", encoding="utf-8")
-    p = _consent_plugin(target, consent_file)
-    assert p._load_consent() is False
-    r = asyncio.run(p.install_skill(source=str(_make_skill(tmp_path, "x-skill"))))
-    assert r["is_error"] is True and r["error"] == "CONSENT_REQUIRED"
+    assert asyncio.run(p.confirm_consent()).value["consent"] == "given"
+    r2 = asyncio.run(p.skillhub_install(skill="some-skill", namespace="ns"))
+    # 确认已放行：返回的是 skillhub 正常的"找不到技能"错误，而不是免责声明拦截
+    assert isinstance(r2, Err), r2
+    assert "免责" not in str(r2.error) and "我确认" not in str(r2.error)
+    assert p._consent_given is False  # 确认被消费
 
 
 def test_audit_skill_name_via_parameters(tmp_path):
@@ -261,6 +265,7 @@ def test_install_duplicate_fails_without_overwrite(tmp_path):
     target.mkdir()
     p = _make_plugin(target)
     assert _ok(asyncio.run(p.install_skill(source=str(src))))
+    assert asyncio.run(p.confirm_consent()).value["consent"] == "given"
     result = _err(asyncio.run(p.install_skill(source=str(src))))
     assert "已存在" in result["output"]
 
@@ -271,6 +276,7 @@ def test_install_overwrite(tmp_path):
     target.mkdir()
     p = _make_plugin(target)
     assert _ok(asyncio.run(p.install_skill(source=str(src))))
+    assert asyncio.run(p.confirm_consent()).value["consent"] == "given"
     result = _ok(asyncio.run(p.install_skill(source=str(src), name="hello-skill", overwrite=True)))
     assert result["installed"] is True
 
@@ -381,7 +387,8 @@ def test_too_many_entries_asks_confirmation(tmp_path, monkeypatch):
     out = result["output"]
     assert out.get("need_confirmation") is True
     assert "条目" in out["reason"]
-    # 用户确认后可装
+    # 用户确认后可装（先补免责声明确认，再 confirm_large）
+    assert asyncio.run(p.confirm_consent()).value["consent"] == "given"
     result2 = _ok(asyncio.run(p.install_skill(source=str(zpath), confirm_large=True)))
     assert result2["installed"] is True
 
@@ -494,6 +501,7 @@ def test_overwrite_string_false_does_not_overwrite(tmp_path):
     target.mkdir()
     p = _make_plugin(target)
     assert _ok(asyncio.run(p.install_skill(source=str(src))))
+    assert asyncio.run(p.confirm_consent()).value["consent"] == "given"
     result = _err(asyncio.run(p.install_skill(source=str(src), overwrite="false")))
     assert "已存在" in result["output"]
 
