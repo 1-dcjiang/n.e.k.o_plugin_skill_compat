@@ -113,8 +113,8 @@ https://market.project-neko.cn/#/plugin/105
 
 | 版本 | 要点 |
 |---|---|
-| **v0.1.14** | 当前正式版。新增 `audit_skill` 安全初步筛查：一键给全部 skill 出风险等级与重点关注清单（只读不执行、不联网）；对常见误报降噪（`subprocess`/凭证词按文档提及 vs 脚本读取分级）；指定 `name` 可看单个 skill 详细命中 |
-| v0.1.13 | 修复 UI 面板：移除 TSX 中对 `react` 的裸导入（surface iframe 无法解析），全部改用官方 `@neko/plugin-ui`；补齐 `@ui.context(id="skills")` 与 plugin.toml 面板 context 配对 |
+| **v0.1.15** | 当前正式版。`audit_skill` 精简为初步筛查：默认只返回每个 skill 的风险等级 + 重点关注清单（不再铺开全部明细），指定 `name` 才看单 skill 详细命中；对常见误报降噪（`subprocess` 单列 medium、凭证词按"文档提及 vs 脚本读取敏感文件"分级） |
+| v0.1.14 | 新增 `audit_skill` 安全审计（初版全量明细，输出过大，v0.1.15 已精简） |
 | v0.1.11 | 修复：大文件确认后不再截断（zip 损坏导致装不上）、支持 `@owner/slug` 双层嵌套 zip、配置布尔严格解析、拒绝 Windows 保留目录名（CON/NUL 等）、SKILL.md 兼容 UTF-8 BOM |
 | v0.1.10 | 修复：skillhub 覆盖不再预删目录（交给 CLI `--force`）、CLI 失败不再被旧目录掩盖、重装同名不再误报失败、namespace 兼容字符串、跳过 WindowsApps 假 python、zip 解压后实际占用复核 |
 | v0.1.9 | 新增 `skillhub_search` / `skillhub_install` 工具：调用本机 skillhub CLI 搜索并安装商店技能（独立 python 探测、代理剥离、UTF-8 解码） |
