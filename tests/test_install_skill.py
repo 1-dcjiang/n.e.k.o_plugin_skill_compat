@@ -2,10 +2,13 @@
 import asyncio
 import gzip
 import http.server
+import os
 import shutil
 import threading
 import zipfile
 from pathlib import Path
+
+import pytest
 
 import plugin.plugins.skill_compat as sc
 from plugin.plugins.skill_compat import SkillCompatPlugin, _as_bool, _safe_name
@@ -394,6 +397,82 @@ def test_load_skill_removed_entry_hint(tmp_path):
     assert isinstance(result, Err)
     assert "已不存在" in str(result.error)
     assert not any("vanished-skill" in k for k in p._idx)
+
+
+# ---------- 终审：扫描失败兜底 / gzip 超限 / tmp 清理 ----------
+
+def test_on_scan_done_failure_resets_to_unscanned(tmp_path):
+    """后台扫描失败后应置回"未扫描"，让下次查询惰性补扫，而不是卡在失败状态。"""
+    p = _make_plugin(tmp_path / "root")
+
+    async def _boom():
+        raise RuntimeError("scan exploded")
+
+    async def _run():
+        task = asyncio.create_task(_boom())
+        try:
+            await task
+        except RuntimeError:
+            pass
+        p._on_scan_done(task)
+
+    asyncio.run(_run())
+    assert p._scan_status == "未扫描"
+
+
+def test_gzip_oversize_asks_confirmation(tmp_path, monkeypatch):
+    """gzip 解压后超过上限应转询问确认，而不是直接返回超大内容。"""
+    max_bytes = 1024
+    # 用重复数据压缩出高压缩比内容（解压后 > max_bytes）
+    big = b"PK\x03\x04" + (b"A" * (max_bytes * 4))
+    enc = gzip.compress(big)
+
+    class _BigGzipHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(enc)))
+            self.end_headers()
+            self.wfile.write(enc)
+
+        def log_message(self, *args):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _BigGzipHandler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    monkeypatch.setattr(sc, "_url_safe", lambda u: True)
+    try:
+        with pytest.raises(sc._NeedConfirmation):
+            sc._download_url_with_redirects(
+                f"http://localhost:{srv.server_port}/big.zip", max_bytes, False)
+    finally:
+        srv.shutdown()
+        t.join()
+
+
+def test_zip_failure_cleans_tmp(tmp_path, monkeypatch):
+    """zip 校验失败（路径穿越）后不应残留临时解压目录。"""
+    zpath = tmp_path / "evil.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr("../evil/SKILL.md", "---\nname: evil\n---\n")
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+    created = []
+
+    orig = sc.tempfile.mkdtemp
+
+    def fake_mkdtemp(*a, **k):
+        d = orig(*a, **k)
+        created.append(d)
+        return d
+
+    monkeypatch.setattr(sc.tempfile, "mkdtemp", fake_mkdtemp)
+    result = _err(asyncio.run(p.install_skill(source=str(zpath))))
+    assert "非法路径" in result["output"]
+    assert len(created) == 1
+    assert not os.path.exists(created[0])
 
 
 def test_install_https_zip_fails_on_unreachable(tmp_path):

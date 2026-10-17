@@ -10,6 +10,7 @@
 import asyncio
 import gzip
 import http.client
+import io
 import ipaddress
 import os
 import re
@@ -164,7 +165,7 @@ def _download_url_with_redirects(url, max_bytes: int, confirm_large: bool = Fals
             else:
                 conn = http.client.HTTPConnection(host, port, timeout=60)
             conn.request("GET", path, headers={
-                "User-Agent": "N.E.K.O-skill_compat/0.1.5",
+                "User-Agent": "N.E.K.O-skill_compat/0.1.6",
                 "Connection": "close",
                 "Accept": "application/zip,application/octet-stream,*/*",
                 "Accept-Encoding": "identity",
@@ -204,11 +205,29 @@ def _download_url_with_redirects(url, max_bytes: int, confirm_large: bool = Fals
             conn.close()
             raise ValueError(f"下载中断: {e}。下一步：重试或改用本地路径导入。")
         conn.close()
-        # 部分 CDN 对 .zip 返回 gzip 编码：解压后再交给调用方（解压后超限由调用方检查）
+        # 部分 CDN 对 .zip 返回 gzip 编码：解压后再交给调用方。
+        # 分块读取限制输出大小（防高压缩比 gzip 解压内存暴涨），超限转询问确认。
         enc = (resp.getheader("Content-Encoding") or "").strip().lower()
         if enc == "gzip":
             try:
-                data = gzip.decompress(data)
+                with gzip.GzipFile(fileobj=io.BytesIO(data)) as gf:
+                    out = bytearray()
+                    while True:
+                        chunk = gf.read(1 << 20)
+                        if not chunk:
+                            break
+                        out.extend(chunk)
+                        if len(out) > max_bytes + 1:
+                            if not confirm_large:
+                                raise _NeedConfirmation(
+                                    f"下载内容 gzip 解压后超过默认上限 {max_bytes // (1024 * 1024)}MB",
+                                    {"source": "downloaded-gzip"},
+                                )
+                            out = out[:max_bytes + 1]
+                            break
+                    data = bytes(out)
+            except _NeedConfirmation:
+                raise
             except OSError:
                 raise ValueError("下载内容 gzip 解压失败。下一步：手动下载后提供本地路径。")
         return data
@@ -229,6 +248,7 @@ class SkillCompatPlugin(NekoPluginBase):
         self._skill_dirs: list[str] = ["/sandbox/workspace/skills"]
         self._follow_symlinks: bool = True
         self._scan_status: str = "未扫描"
+        self._scanning: bool = False
 
     # ══════════ 生命周期 ══════════
 
@@ -261,11 +281,14 @@ class SkillCompatPlugin(NekoPluginBase):
         return Ok({"status": "shutdown"})
 
     def _on_scan_done(self, task):
-        """后台扫描完成回调：捕获异常，避免 fire-and-forget 静默失败。"""
+        """后台扫描完成回调：失败时置回"未扫描"，让下次查询惰性补扫（否则 AI 会一直看到空列表）。"""
         try:
             task.result()
+        except asyncio.CancelledError:
+            # 宿主取消后台任务属预期（v0.1.3 根因），保持"未扫描"由惰性补扫兜底
+            self._scan_status = "未扫描"
         except Exception as e:
-            self._scan_status = f"扫描失败: {e}"
+            self._scan_status = "未扫描"
             try:
                 self.logger.error(f"skill_compat 扫描失败: {e}")
             except Exception:
@@ -430,7 +453,9 @@ class SkillCompatPlugin(NekoPluginBase):
             return Err(SdkError("缺少搜索关键词 query。"))
         await self._ensure_scan()
         with self._lock:
-            items = [s for s in self._idx.values() if os.path.isdir(s['path'])]
+            items = list(self._idx.values())
+        # 过滤已被删除/移动的失效条目（轻量校验，放锁外）
+        items = [s for s in items if os.path.isdir(s['path'])]
         hits = []
         for s in items:
             hay = ((s.get('name') or '') + ' ' + (s.get('description') or '')).lower()
@@ -482,9 +507,12 @@ class SkillCompatPlugin(NekoPluginBase):
         params = _.get('parameters') or {}
         source = source or params.get('source')
         name = name or params.get('name') or ''
+        # 防御非字符串参数（LLM 工具框架通常传 str，但保险起见统一转 str）
+        source = str(source) if source else ''
+        name = str(name) if name else ''
         overwrite = _as_bool(overwrite) or _as_bool(params.get('overwrite', False))
         confirm_large = _as_bool(confirm_large) or _as_bool(params.get('confirm_large', False))
-        source = (source or '').strip()
+        source = source.strip()
         if not source:
             return {"output": "缺少参数 source。请提供要安装的 skill 来源：本地目录路径、本地 .zip 路径或 https 下载链接。",
                     "is_error": True, "error": "MISSING_SOURCE"}
@@ -615,13 +643,18 @@ class SkillCompatPlugin(NekoPluginBase):
                         raise ValueError(f"zip 内含符号链接条目，已拒绝: {n}")
                 zf.extractall(tmp)
         except zipfile.BadZipFile:
+            shutil.rmtree(tmp, ignore_errors=True)
             raise ValueError(f"不是有效的 zip 文件: {zip_path}")
+        except Exception:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
         for d in sorted(os.listdir(tmp)):
             full = os.path.join(tmp, d)
             if os.path.isdir(full) and os.path.isfile(os.path.join(full, 'SKILL.md')):
                 return full, d, tmp
         if os.path.isfile(os.path.join(tmp, 'SKILL.md')):
             return tmp, 'skill', tmp
+        shutil.rmtree(tmp, ignore_errors=True)
         raise ValueError("zip 里找不到含 SKILL.md 的 skill 目录")
 
     def _stage_from_url(self, url, confirm_large: bool = False):
@@ -632,21 +665,28 @@ class SkillCompatPlugin(NekoPluginBase):
                 "下一步：如果你用的是代理类网络工具（域名被解析到 127.0.0.1），"
                 "请先手动下载该 zip 后提供本地路径导入。")
         tmp = tempfile.mkdtemp(prefix='neko_skill_dl_')
-        # 安全下载：逐跳校验重定向目标（防 302 跳内网 = SSRF），CL/内容超限转询问确认
-        data = _download_url_with_redirects(
-            url, _MAX_PACKAGE_BYTES, confirm_large)
-        if not confirm_large and len(data) > _MAX_PACKAGE_BYTES:
-            raise _NeedConfirmation(
-                f"下载内容约 {round(len(data) / (1024 * 1024), 1)}MB，超过默认上限 {_MAX_PACKAGE_BYTES // (1024 * 1024)}MB",
-                {"size_mb": round(len(data) / (1024 * 1024), 1), "source": "downloaded"},
-            )
-        fname = _safe_name(os.path.basename(url.split('?')[0])) or 'skill.zip'
-        fpath = os.path.join(tmp, fname)
-        with open(fpath, 'wb') as f:
-            f.write(data)
-        if fname.lower().endswith('.zip') or data[:2] == b'PK':
-            return self._stage_zip(fpath, confirm_large)
-        raise ValueError("下载内容不是 .zip 压缩包。请提供 .zip 链接（如 GitHub 的 Download ZIP），或手动下载后提供本地路径。")
+        try:
+            # 安全下载：逐跳校验重定向目标（防 302 跳内网 = SSRF），CL/内容超限转询问确认
+            data = _download_url_with_redirects(
+                url, _MAX_PACKAGE_BYTES, confirm_large)
+            if not confirm_large and len(data) > _MAX_PACKAGE_BYTES:
+                raise _NeedConfirmation(
+                    f"下载内容约 {round(len(data) / (1024 * 1024), 1)}MB，超过默认上限 {_MAX_PACKAGE_BYTES // (1024 * 1024)}MB",
+                    {"size_mb": round(len(data) / (1024 * 1024), 1), "source": "downloaded"},
+                )
+            fname = _safe_name(os.path.basename(url.split('?')[0])) or 'skill.zip'
+            fpath = os.path.join(tmp, fname)
+            with open(fpath, 'wb') as f:
+                f.write(data)
+            if fname.lower().endswith('.zip') or data[:2] == b'PK':
+                return self._stage_zip(fpath, confirm_large)
+            raise ValueError("下载内容不是 .zip 压缩包。请提供 .zip 链接（如 GitHub 的 Download ZIP），或手动下载后提供本地路径。")
+        except _NeedConfirmation:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+        except Exception:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
 
     # ══════════ UI（展示已加载 skill） ══════════
 
