@@ -303,7 +303,7 @@ def _download_url_with_redirects(url, max_bytes: int, confirm_large: bool = Fals
             else:
                 conn = http.client.HTTPConnection(host, port, timeout=60)
             conn.request("GET", path, headers={
-                "User-Agent": "N.E.K.O-skill_compat/0.1.19",
+                "User-Agent": "N.E.K.O-skill_compat/0.1.20",
                 "Connection": "close",
                 "Accept": "application/zip,application/octet-stream,*/*",
                 "Accept-Encoding": "identity",
@@ -862,12 +862,20 @@ class SkillCompatPlugin(NekoPluginBase):
             # 防御：确保目标仍在 target_root 内（dir_name 已清洗，双保险）
             if not os.path.abspath(target).startswith(os.path.abspath(target_root) + os.sep):
                 return {"output": f"目标路径越界，已拒绝: {target}", "is_error": True, "error": "PATH_ESCAPE"}
-            if os.path.exists(target):
-                if not overwrite:
-                    return {"output": f"目标目录已存在: {target}。下一步：设置 overwrite=true 覆盖，或换一个 name。",
-                            "is_error": True, "error": "ALREADY_EXISTS"}
-                await asyncio.to_thread(shutil.rmtree, target, ignore_errors=True)
-            await asyncio.to_thread(shutil.copytree, staging, target)
+            src_abs = os.path.abspath(staging)
+            in_place = os.path.dirname(src_abs).casefold() == os.path.abspath(target_root).casefold()
+            if in_place:
+                # 源目录已在受管根内（用户直接安装受管目录里的 skill）：直接采用原目录，
+                # 不复制、不产生"清洗后新目录 + 原目录"两份重复。
+                target = src_abs
+                dir_name = os.path.basename(src_abs)
+            else:
+                if os.path.exists(target):
+                    if not overwrite:
+                        return {"output": f"目标目录已存在: {target}。下一步：设置 overwrite=true 覆盖，或换一个 name。",
+                                "is_error": True, "error": "ALREADY_EXISTS"}
+                    await asyncio.to_thread(shutil.rmtree, target, ignore_errors=True)
+                await asyncio.to_thread(shutil.copytree, staging, target)
             # 刷新索引，让新 skill 立即可被 list/load/search 使用；
             # 扫描失败不影响安装结果（下次查询会惰性补扫）
             try:

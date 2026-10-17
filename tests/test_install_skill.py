@@ -289,6 +289,26 @@ def test_install_bad_source(tmp_path):
     assert _err(asyncio.run(p.install_skill(source="")))
 
 
+def test_install_source_inside_managed_root_in_place(tmp_path):
+    """源目录已在受管根内：直接采用原目录（不复制出重复副本），remove 可删净。"""
+    target = tmp_path / "root"
+    target.mkdir()
+    src = _make_skill(target, "in-place-skill")  # 直接建在 root 内
+    p = _make_plugin(target)
+    r = _ok(asyncio.run(p.install_skill(source=str(src))))
+    assert r["installed"] is True
+    assert r["path"] == str(src), "应直接采用原目录，而不是复制出新的"
+    # 不应产生重复副本
+    dup = target / "in_place_skill"  # 清洗后名称（若误复制会出现）
+    assert not dup.exists()
+    # 索引应只有一个该 skill，remove 后目录被删净
+    st = asyncio.run(p.skill_status())
+    assert st.value["total"] == 1
+    rm = asyncio.run(p.remove_skill(name="in-place-skill"))
+    assert isinstance(rm, Ok), rm
+    assert not src.exists(), "remove 后原目录应被删除"
+
+
 def test_install_dir_without_skillmd(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
