@@ -80,6 +80,7 @@ https://market.project-neko.cn/#/plugin/105
 | `load_skill` | 加载指定 skill 的完整 `SKILL.md` 内容 |
 | `search_skills` | 按关键词在 skill 名称与描述中搜索 |
 | `skill_status` | 查看运行状态与兼容性报告（扫描目录、已加载数量、格式问题） |
+| `audit_skill` | **静态安全审计**：检查 skill 内容与脚本中的危险命令、敏感凭证、数据外传、提示注入、可疑链接，给出风险等级（safe/low/medium/high/critical）；只读不执行、不联网 |
 
 ---
 
@@ -96,6 +97,7 @@ https://market.project-neko.cn/#/plugin/105
 - **严格参数解析**：布尔参数严格解析（`"false"` 字符串不会再被当成 `True` 覆盖安装）
 - **临时文件清理**：校验或下载失败时自动清理临时目录，不残留垃圾
 - **内容即数据**：skill 内容是数据不是命令，插件不会盲目执行其中的指令
+- **skill 安全审计（v0.1.14+）**：`audit_skill` 工具对 skill 的 SKILL.md 与目录内脚本做静态启发式检查（危险命令/下载即执行、敏感凭证、数据外传、提示注入、可疑外链、资源规模），按最高风险项定级；只读不执行、不联网，结果供人工确认
 
 ---
 
@@ -111,8 +113,8 @@ https://market.project-neko.cn/#/plugin/105
 
 | 版本 | 要点 |
 |---|---|
-| **v0.1.13** | 当前正式版。修复 UI 面板：移除 TSX 中对 `react` 的裸导入（surface iframe 无法解析），全部改用官方 `@neko/plugin-ui`；补齐 `@ui.context(id="skills")` 与 plugin.toml 面板 context 配对 |
-| v0.1.12 | 对齐官方规范：所有 LLM 工具显式设置超时（安装/搜索类 120–300s，避免真实调用被 30s 默认超时掐断）、查询类工具签名加 `*` 防位置参数 |
+| **v0.1.14** | 当前正式版。新增 `audit_skill` 安全审计工具：静态检查 skill 内容与脚本（危险命令/下载即执行、敏感凭证、数据外传、提示注入、可疑链接、资源规模），输出风险等级与命中项；只读不执行、不联网 |
+| v0.1.13 | 修复 UI 面板：移除 TSX 中对 `react` 的裸导入（surface iframe 无法解析），全部改用官方 `@neko/plugin-ui`；补齐 `@ui.context(id="skills")` 与 plugin.toml 面板 context 配对 |
 | v0.1.11 | 修复：大文件确认后不再截断（zip 损坏导致装不上）、支持 `@owner/slug` 双层嵌套 zip、配置布尔严格解析、拒绝 Windows 保留目录名（CON/NUL 等）、SKILL.md 兼容 UTF-8 BOM |
 | v0.1.10 | 修复：skillhub 覆盖不再预删目录（交给 CLI `--force`）、CLI 失败不再被旧目录掩盖、重装同名不再误报失败、namespace 兼容字符串、跳过 WindowsApps 假 python、zip 解压后实际占用复核 |
 | v0.1.9 | 新增 `skillhub_search` / `skillhub_install` 工具：调用本机 skillhub CLI 搜索并安装商店技能（独立 python 探测、代理剥离、UTF-8 解码） |
