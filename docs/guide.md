@@ -25,6 +25,7 @@
 - "安装这个 skill：`https://example.com/xxx.zip`"（在线 .zip，如 GitHub 的 Download ZIP 链接）
 
 同名已存在时 AI 会询问是否覆盖；也可直接说"覆盖安装"（overwrite=true）。
+来源超过默认资源上限（解压/下载超 200MB 或 zip 超 5000 条目）时，AI 会先询问你确认，你同意后它会带 confirm_large=true 继续安装。
 
 ## 配置（plugin.toml → settings）
 - `skill_dirs`：skill 搜索目录列表（默认 `["/sandbox/workspace/skills"]`）；**自主安装的新 skill 会装进其中第一个可写目录**
