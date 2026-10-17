@@ -657,12 +657,77 @@ def test_skillhub_install_no_writable_dir(tmp_path, monkeypatch):
 
 
 def test_skillhub_install_exists_no_overwrite(tmp_path, monkeypatch):
+    """同名目录已存在且未 overwrite：CLI 自己会拒绝（Target exists），插件报错并提示 --force。"""
     target = tmp_path / "root"
     target.mkdir()
     p = _make_plugin(target)
     _make_skill(target, "test")
+
+    async def fake_run(self, args, timeout=180):
+        return 1, "", "Target exists: ... (use --force to overwrite)"
+
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_scan_all", _fake_scan)
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_run_skillhub", fake_run)
     result = _errx(asyncio.run(p.skillhub_install(skill="test", namespace="clawhub_arein")))
-    assert "已存在" in result["output"]
+    assert "未成功" in result["output"]
+
+
+def test_skillhub_install_overwrite_passes_force(tmp_path, monkeypatch):
+    """overwrite=true 时把 --force 传给 CLI（由 CLI 按实际目录覆盖），且不预先删除任何目录。"""
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+    _make_skill(target, "test")  # 用户已有的同名目录，不应被插件预先删除
+    seen = {}
+
+    async def fake_run(self, args, timeout=180):
+        seen["args"] = args
+        return 0, "installed ok", ""
+
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_scan_all", _fake_scan)
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_run_skillhub", fake_run)
+    out = _okx(asyncio.run(p.skillhub_install(skill="test", namespace="clawhub_arein", overwrite=True)))
+    assert "--force" in seen["args"]
+    assert out["installed"] is True
+    assert os.path.isdir(os.path.join(target, "test"))  # 目录还在（覆盖交给 CLI）
+
+
+def test_skillhub_install_namespace_dir(tmp_path, monkeypatch):
+    """CLI 把社区技能装到 <root>/@namespace/skill：插件应识别实际目录并返回真实 path。"""
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+
+    async def fake_run(self, args, timeout=180):
+        ns_dir = os.path.join(target, "@clawhub_arein", "test")
+        os.makedirs(ns_dir, exist_ok=True)
+        with open(os.path.join(ns_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: find-skills\n---\n")
+        return 0, "installed ok", ""
+
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_scan_all", _fake_scan)
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_run_skillhub", fake_run)
+    out = _okx(asyncio.run(p.skillhub_install(skill="test", namespace="clawhub_arein")))
+    assert out["installed"] is True
+    assert out["path"].endswith(os.path.join("@clawhub_arein", "test"))
+
+
+def test_skillhub_install_reexists_ok(tmp_path, monkeypatch):
+    """重装同名技能（覆盖成功但索引条目数不变）不应误报失败：目录存在即视为成功。"""
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+    _make_skill(target, "test")
+    _fake_scan(p)  # 预置索引（total=1）
+
+    async def fake_run(self, args, timeout=180):
+        # CLI --force 覆盖成功：目录仍在
+        return 0, "installed ok", ""
+
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_scan_all", _fake_scan)
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_run_skillhub", fake_run)
+    out = _okx(asyncio.run(p.skillhub_install(skill="test", namespace="clawhub_arein", overwrite=True)))
+    assert out["installed"] is True
 
 
 def test_skillhub_install_cli_failed(tmp_path, monkeypatch):
