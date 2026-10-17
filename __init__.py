@@ -233,7 +233,7 @@ def _download_url_with_redirects(url, max_bytes: int, confirm_large: bool = Fals
             else:
                 conn = http.client.HTTPConnection(host, port, timeout=60)
             conn.request("GET", path, headers={
-                "User-Agent": "N.E.K.O-skill_compat/0.1.12",
+                "User-Agent": "N.E.K.O-skill_compat/0.1.13",
                 "Connection": "close",
                 "Accept": "application/zip,application/octet-stream,*/*",
                 "Accept-Encoding": "identity",
@@ -977,6 +977,20 @@ class SkillCompatPlugin(NekoPluginBase):
             raise
 
     # ══════════ UI（展示已加载 skill） ══════════
+
+    @ui.context(id="skills", title="已加载 Skill")
+    async def skills_context(self, **_):
+        """Hosted UI 面板的 props.state 来源（与 plugin.toml panel context="skills" 配对）。"""
+        await self._ensure_scan()
+        with self._lock:
+            items = list(self._idx.values())
+        items = [s for s in items if os.path.isdir(s['path'])]
+        return {
+            "count": len(items),
+            "scan_status": self._scan_status,
+            "skills": [{"name": s.get('name') or s.get('dirname'), "description": s.get('description', ''),
+                        "path": s['path'], "kind": s['kind']} for s in items],
+        }
 
     @ui.action(id="refresh_skills", label="重新扫描 Skill")
     @plugin_entry(id="refresh_skills", kind="action")
