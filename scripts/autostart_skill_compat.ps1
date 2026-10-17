@@ -50,7 +50,9 @@ while ((Get-Date) -lt $deadline) {
 if (-not $portOk) { Log "FAIL: host port ${HOST_PORT} not reachable within ${TimeoutSec}s"; exit 1 }
 Log "host port ${HOST_PORT} reachable"
 
-# 3) 幂等判定：工具注册表里已有 skill_compat 工具 → 已就绪，直接退出
+# 3) 幂等判定：工具注册表里必须有全部 skill_compat 工具才算就绪。
+#    注意：不能用 Count -gt 0——宿主启动时可能只注册了一部分（如 6/10），
+#    此时必须 stop+start 触发完整注册，否则 YUI 会缺少 install_skill 等工具。
 function Get-ScToolHits {
     try {
         $reg = Invoke-RestMethod -Uri "http://127.0.0.1:${REG_PORT}/api/tools" -TimeoutSec 5
@@ -59,12 +61,23 @@ function Get-ScToolHits {
     } catch { return @() }
 }
 $hits = @(Get-ScToolHits)
-if ($hits.Count -gt 0) {
-    Log "already ready (tools: $($hits -join ',')) - skip start (idempotent)"
+if ($hits.Count -eq $SC_TOOLS.Count) {
+    Log "already fully ready (all $($SC_TOOLS.Count) tools registered) - skip start (idempotent)"
     Log "=== autostart ok (already ready) ==="
     exit 0
 }
-Log "not ready yet - requesting start"
+if ($hits.Count -gt 0) {
+    Log "partial registration detected: $($hits.Count)/$($SC_TOOLS.Count) tools ($($hits -join ',')). Will stop+start to trigger full registration."
+    try {
+        $null = Invoke-WebRequest -Uri "http://127.0.0.1:${HOST_PORT}/plugin/${PLUGIN_ID}/stop" -Method Post -Body "{}" -ContentType "application/json" -TimeoutSec 10 -UseBasicParsing
+        Log "stop ok (for partial re-registration)"
+        Start-Sleep -Seconds 2
+    } catch {
+        Log "stop failed (non-fatal, will try start anyway): $($_.Exception.Message)"
+    }
+} else {
+    Log "not ready yet - requesting start"
+}
 
 # 4) POST start 开启插件
 try {
@@ -76,13 +89,14 @@ try {
     exit 1
 }
 
-# 5) 轮询工具注册表直到就绪
+# 5) 轮询工具注册表直到全部就绪（必须 10/10，部分注册不算就绪）
 $ready = $false
 while ((Get-Date) -lt $deadline) {
     $hits = @(Get-ScToolHits)
-    if ($hits.Count -gt 0) { $ready = $true; Log "tools ready: $($hits -join ',')"; break }
+    if ($hits.Count -eq $SC_TOOLS.Count) { $ready = $true; Log "all $($SC_TOOLS.Count) tools ready"; break }
+    Log "waiting... $($hits.Count)/$($SC_TOOLS.Count) tools registered"
     Start-Sleep -Seconds 2
 }
 if ($ready) { Log "=== autostart ok ==="; exit 0 }
-Log "FAIL: skill_compat tools not registered within ${TimeoutSec}s"
+Log "FAIL: skill_compat tools not fully registered within ${TimeoutSec}s (last: $($hits.Count)/$($SC_TOOLS.Count))"
 exit 1
