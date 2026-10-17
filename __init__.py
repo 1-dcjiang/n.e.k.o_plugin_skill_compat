@@ -42,6 +42,9 @@ VALID_DIRNAME = re.compile(r'^[a-z0-9][a-z0-9-]*$')
 # 安装时允许的目录名字符：字母/数字/中文/下划线/点/连字符，其余替换为 _
 _SAFE_NAME_RE = re.compile(r'[^a-zA-Z0-9\u4e00-\u9fff._-]')
 
+# Windows 保留设备名（含带扩展名形态，如 con.txt、COM1.zip），目录名不得使用
+_WIN_RESERVED_NAMES = {"con", "prn", "aux", "nul"} | {f"com{i}" for i in range(1, 10)} | {f"lpt{i}" for i in range(1, 10)}
+
 # 安装来源大小上限（超限时转为询问确认，而不是直接禁止）
 _MAX_PACKAGE_BYTES = 200 * 1024 * 1024
 _MAX_ARCHIVE_ENTRIES = 5000
@@ -115,7 +118,9 @@ class _NeedConfirmation(Exception):
 
 
 def parse_frontmatter(text):
-    """解析 SKILL.md 顶部 ---...--- YAML 头，返回 dict（缺则 {}）。"""
+    """解析 SKILL.md 顶部 ---...--- YAML 头，返回 dict（缺则 {}）。兼容 UTF-8 BOM。"""
+    if text.startswith('\ufeff'):
+        text = text.lstrip('\ufeff')
     if not text.startswith('---'):
         return {}
     lines = text.split('\n')
@@ -144,11 +149,14 @@ def _as_bool(v) -> bool:
 
 
 def _safe_name(s):
-    """把任意来源字符串转成安全的目录名（去路径分隔符、..、控制字符）。"""
+    """把任意来源字符串转成安全的目录名（去路径分隔符、..、控制字符、Windows 保留名）。"""
     s = (s or '').strip().replace('\\', '/').rstrip('/')
     base = os.path.basename(s)
     base = _SAFE_NAME_RE.sub('_', base).strip('._-')
+    # Windows 下保留设备名（含 con.txt 形态）即使清洗后也不能作为目录名
     if not base or base in ('.', '..'):
+        return None
+    if os.name == 'nt' and base.split('.')[0].lower() in _WIN_RESERVED_NAMES:
         return None
     return base
 
@@ -225,7 +233,7 @@ def _download_url_with_redirects(url, max_bytes: int, confirm_large: bool = Fals
             else:
                 conn = http.client.HTTPConnection(host, port, timeout=60)
             conn.request("GET", path, headers={
-                "User-Agent": "N.E.K.O-skill_compat/0.1.10",
+                "User-Agent": "N.E.K.O-skill_compat/0.1.11",
                 "Connection": "close",
                 "Accept": "application/zip,application/octet-stream,*/*",
                 "Accept-Encoding": "identity",
@@ -261,6 +269,10 @@ def _download_url_with_redirects(url, max_bytes: int, confirm_large: bool = Fals
                 )
         try:
             data = resp.read(max_bytes + 1)
+            # 超限且已确认（confirm_large）：继续读完剩余数据，不能截断——
+            # 截断的 zip 后续解压必然失败，等于"用户确认了大文件却装不上"。
+            if len(data) > max_bytes and confirm_large:
+                data += resp.read()
         except OSError as e:
             conn.close()
             raise ValueError(f"下载中断: {e}。下一步：重试或改用本地路径导入。")
@@ -277,14 +289,12 @@ def _download_url_with_redirects(url, max_bytes: int, confirm_large: bool = Fals
                         if not chunk:
                             break
                         out.extend(chunk)
-                        if len(out) > max_bytes + 1:
-                            if not confirm_large:
-                                raise _NeedConfirmation(
-                                    f"下载内容 gzip 解压后超过默认上限 {max_bytes // (1024 * 1024)}MB",
-                                    {"source": "downloaded-gzip"},
-                                )
-                            out = out[:max_bytes + 1]
-                            break
+                        if len(out) > max_bytes + 1 and not confirm_large:
+                            # 未确认：转询问；已确认：继续解压完，不截断（截断=坏 zip）
+                            raise _NeedConfirmation(
+                                f"下载内容 gzip 解压后超过默认上限 {max_bytes // (1024 * 1024)}MB",
+                                {"source": "downloaded-gzip"},
+                            )
                     data = bytes(out)
             except _NeedConfirmation:
                 raise
@@ -321,7 +331,7 @@ class SkillCompatPlugin(NekoPluginBase):
             dirs = settings.get("skill_dirs")
             if isinstance(dirs, list) and dirs:
                 self._skill_dirs = [str(d) for d in dirs]
-            self._follow_symlinks = bool(settings.get("follow_symlinks", True))
+            self._follow_symlinks = _as_bool(settings.get("follow_symlinks", True))
         except Exception:
             self.logger.warning("skill_compat: 读取配置失败，使用默认 skill_dirs")
         # 耗时扫描放后台，避免 10 秒超时；异常经 done_callback 落日志不静默丢失
@@ -904,12 +914,27 @@ class SkillCompatPlugin(NekoPluginBase):
         except Exception:
             shutil.rmtree(tmp, ignore_errors=True)
             raise
-        for d in sorted(os.listdir(tmp)):
-            full = os.path.join(tmp, d)
-            if os.path.isdir(full) and os.path.isfile(os.path.join(full, 'SKILL.md')):
-                return full, d, tmp
-        if os.path.isfile(os.path.join(tmp, 'SKILL.md')):
-            return tmp, 'skill', tmp
+        # 递归（限深 3 层）找含 SKILL.md 的 skill 根：兼容 zip 内的
+        # `@owner/slug/` 双层嵌套结构（skillhub 社区包常见布局），
+        # 取路径最短（最外层）的命中，保留可读目录名。
+        def _find_skill_root(d, depth=0):
+            if depth > 3:
+                return None
+            if os.path.isfile(os.path.join(d, 'SKILL.md')):
+                return d
+            for sub in sorted(os.listdir(d)):
+                full = os.path.join(d, sub)
+                if os.path.isdir(full):
+                    r = _find_skill_root(full, depth + 1)
+                    if r:
+                        return r
+            return None
+
+        root = _find_skill_root(tmp)
+        if root:
+            rel = os.path.relpath(root, tmp)
+            name = rel.split(os.sep)[0] if rel != '.' else 'skill'
+            return root, name, tmp
         shutil.rmtree(tmp, ignore_errors=True)
         raise ValueError("zip 里找不到含 SKILL.md 的 skill 目录")
 
