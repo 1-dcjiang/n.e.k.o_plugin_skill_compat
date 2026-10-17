@@ -154,6 +154,21 @@ class SkillCompatPlugin(NekoPluginBase):
         except Exception:
             pass
 
+    async def _ensure_scan(self):
+        """惰性扫描：查询前确保索引已建立。
+
+        安装版宿主会在 lifecycle（startup/reload）返回后取消插件进程里的自由后台任务，
+        on_startup 里 create_task(_scan_all) 的扫描可能因此从未完成；所以所有只读查询
+        工具调用前先确保索引已扫，避免 AI 拿到空的 skill 列表。
+        """
+        if self._scan_status != "未扫描" or getattr(self, "_scanning", False):
+            return
+        self._scanning = True
+        try:
+            await self._scan_all()
+        finally:
+            self._scanning = False
+
     def _scan_dir(self, root):
         """同步扫描一个 skill 根目录（放锁外由 to_thread 调用）。"""
         found = []
@@ -220,6 +235,7 @@ class SkillCompatPlugin(NekoPluginBase):
         params = _.get('parameters') or {}
         keyword = keyword or (params.get('keyword') or '')
         keyword = (keyword or '').lower()
+        await self._ensure_scan()
         with self._lock:
             items = list(self._idx.values())
         if keyword:
@@ -242,6 +258,7 @@ class SkillCompatPlugin(NekoPluginBase):
         name = name or params.get('name')
         if not name:
             return Err(SdkError("缺少参数 name。请先调 list_skills 获取可用 skill 名称。"))
+        await self._ensure_scan()
         info = self._find_by_name(name)
         if not info:
             with self._lock:
@@ -265,6 +282,7 @@ class SkillCompatPlugin(NekoPluginBase):
         query = (query or '').lower().strip()
         if not query:
             return Err(SdkError("缺少搜索关键词 query。"))
+        await self._ensure_scan()
         with self._lock:
             items = list(self._idx.values())
         hits = []
@@ -280,6 +298,7 @@ class SkillCompatPlugin(NekoPluginBase):
         parameters={"type": "object", "properties": {}, "required": []},
     )
     async def skill_status(self, **_):
+        await self._ensure_scan()
         with self._lock:
             items = list(self._idx.values())
         symlink_n = sum(1 for s in items if s['kind'] == 'symlink')
