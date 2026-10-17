@@ -8,8 +8,9 @@ import threading
 import zipfile
 from pathlib import Path
 
-import plugin.plugins.skill_compat as sc
 import pytest
+
+import plugin.plugins.skill_compat as sc
 from plugin.plugins.skill_compat import SkillCompatPlugin, _as_bool, _safe_name
 from plugin.sdk.plugin import Err, Ok
 
@@ -482,3 +483,250 @@ def test_install_https_zip_fails_on_unreachable(tmp_path):
     result = asyncio.run(p.install_skill(source="https://github.com/1-dcjiang/n.e.k.o_plugin_skill_compat/archive/refs/tags/v0.1.1.zip"))
     assert isinstance(result, dict), result
     assert result.get("is_error") is True or result.get("is_error") is False, result
+
+
+# ---------- skillhub 商店工具 ----------
+
+SAMPLE_SEARCH = """@clawhub_arein/test  Test
+  - CLI for crypto portfolio tracking. Use when the user asks about crypto prices.
+命令行工具，用于追踪加密资产组合、市场数据。
+  - version: 0.0.1
+  - install: skillhub install test --namespace clawhub_arein
+  test  test
+  - 编程专家。P8 级编程助手。
+  - version: 1.0.1
+@user_65ffa0a2/workbuddy-report  WorkBuddy 报告
+  - 生成客户合作机会分析 HTML 报告。
+  - version: 1.0.0
+  - install: skillhub install workbuddy-report --namespace user_65ffa0a2
+"""
+
+
+def _errx(result) -> dict:
+    """接受 dict（install_skill 风格）或 Err（Ok/Err 风格），统一返回错误描述。"""
+    if isinstance(result, dict):
+        assert result.get("is_error") is True, result
+        return result
+    assert isinstance(result, Err), result
+    return {"output": str(result.error)}
+
+
+def _okx(result) -> dict:
+    """接受 dict 或 Ok，统一返回成功负载。"""
+    if isinstance(result, dict):
+        assert result.get("is_error") is False, result
+        return result["output"]
+    assert isinstance(result, Ok), result
+    return result.value
+
+
+def test_parse_skillhub_search():
+    rows = sc._parse_skillhub_search(SAMPLE_SEARCH)
+    assert len(rows) == 3
+    first = rows[0]
+    assert first["name"] == "test"
+    assert first["namespace"] == "clawhub_arein"
+    assert first["version"] == "0.0.1"
+    assert "crypto" in first["description"]
+    # 无 @ 前缀行：namespace 为空
+    assert rows[1]["name"] == "test"
+    assert rows[1]["namespace"] == ""
+    assert rows[2]["namespace"] == "user_65ffa0a2"
+
+
+def test_parse_skillhub_search_empty():
+    assert sc._parse_skillhub_search("no matches") == []
+
+
+SAMPLE_JSON = """{"query": "test", "count": 3, "results": [
+{"slug": "@clawhub_arein/test", "publicSlug": "test", "name": "Test", "description": "CLI for crypto tracking.\\n命令行工具。", "version": "0.0.1", "source": "community", "namespace": {"canonicalName": "@clawhub_arein/test", "displayName": "arein", "handle": "clawhub_arein", "publicSlug": "test"}},
+{"slug": "test", "publicSlug": "test", "name": "test", "description": "编程专家。", "version": "1.0.1", "source": "community", "namespace": null},
+{"slug": "@user_65ffa0a2/workbuddy-report", "publicSlug": "workbuddy-report", "name": "WorkBuddy 报告", "description": "生成报告。", "version": "1.0.0", "source": "community", "namespace": {"canonicalName": "@user_65ffa0a2/workbuddy-report", "displayName": "user_65ffa0a2", "handle": "user_65ffa0a2", "publicSlug": "workbuddy-report"}}
+]}"""
+
+
+def test_skillhub_search_json_path(tmp_path, monkeypatch):
+    """search 走 --json 解析：namespace 有/无、描述换行清理。"""
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+
+    async def fake_run(self, args, timeout=120):
+        assert "--json" in args
+        return 0, SAMPLE_JSON, ""
+
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_run_skillhub", fake_run)
+    out = _okx(asyncio.run(p.skillhub_search(query="test")))
+    assert out["count"] == 3
+    first = out["results"][0]
+    assert first["namespace"] == "clawhub_arein"
+    assert first["name"] == "test"
+    assert "命令行工具" in first["description"] and "\n" not in first["description"]
+    assert out["results"][1]["namespace"] == ""
+    assert out["results"][2]["namespace"] == "user_65ffa0a2"
+
+
+async def _fake_scan(self):
+    """测试用 _scan_all：把 skill_dirs[0] 下含 SKILL.md 的目录建入索引。"""
+    root = self._skill_dirs[0]
+    for d in sorted(os.listdir(root)):
+        full = os.path.join(root, d)
+        if os.path.isdir(full) and os.path.isfile(os.path.join(full, "SKILL.md")):
+            self._idx[full] = {"name": d, "description": "", "path": full, "kind": "dir", "has_yaml": False}
+
+
+def test_skillhub_search_ok(tmp_path, monkeypatch):
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+
+    async def fake_run(self, args, timeout=120):
+        return 0, SAMPLE_SEARCH, ""
+
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_run_skillhub", fake_run)
+    out = _okx(asyncio.run(p.skillhub_search(query="test")))
+    assert out["count"] == 3
+    assert out["results"][0]["namespace"] == "clawhub_arein"
+    assert "hint" in out
+
+
+def test_skillhub_search_missing_query(tmp_path):
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+    result = _errx(asyncio.run(p.skillhub_search(query="")))
+    assert "query" in result["output"]
+
+
+def test_skillhub_search_cli_missing(tmp_path, monkeypatch):
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_skillhub_cli_path", lambda self: None)
+    result = _errx(asyncio.run(p.skillhub_search(query="test")))
+    assert "未找到 skillhub CLI" in result["output"]
+
+
+def test_skillhub_search_cli_error(tmp_path, monkeypatch):
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+
+    async def fake_run(self, args, timeout=120):
+        return 2, "", "boom"
+
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_run_skillhub", fake_run)
+    result = _errx(asyncio.run(p.skillhub_search(query="test")))
+    assert "返回错误" in result["output"]
+
+
+def test_skillhub_install_ok(tmp_path, monkeypatch):
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+
+    async def fake_run(self, args, timeout=180):
+        _make_skill(target, "test")  # 模拟 CLI 安装落盘
+        return 0, "installed ok", ""
+
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_scan_all", _fake_scan)
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_run_skillhub", fake_run)
+    out = _okx(asyncio.run(p.skillhub_install(skill="test", namespace="clawhub_arein")))
+    assert out["installed"] is True
+    assert out["name"] == "test"
+    assert "test" in out["path"]
+
+
+def test_skillhub_install_missing_args(tmp_path):
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+    result = _errx(asyncio.run(p.skillhub_install(skill="", namespace="")))
+    assert "skill 或 namespace" in result["output"]
+
+
+def test_skillhub_install_no_writable_dir(tmp_path, monkeypatch):
+    target = tmp_path / "root"
+    p = _make_plugin(target)  # root 未创建 -> 不可写
+
+    async def fake_run(self, args, timeout=180):
+        return 0, "ok", ""
+
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_run_skillhub", fake_run)
+    result = _errx(asyncio.run(p.skillhub_install(skill="test", namespace="clawhub_arein")))
+    assert "没有可写的 skill 目录" in result["output"]
+
+
+def test_skillhub_install_exists_no_overwrite(tmp_path, monkeypatch):
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+    _make_skill(target, "test")
+    result = _errx(asyncio.run(p.skillhub_install(skill="test", namespace="clawhub_arein")))
+    assert "已存在" in result["output"]
+
+
+def test_skillhub_install_cli_failed(tmp_path, monkeypatch):
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+
+    async def fake_run(self, args, timeout=180):
+        return 1, "", "server error"
+
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_scan_all", _fake_scan)
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_run_skillhub", fake_run)
+    result = _errx(asyncio.run(p.skillhub_install(skill="nope", namespace="clawhub_arein")))
+    assert "未成功" in result["output"]
+
+
+def test_run_skillhub_strips_proxy(tmp_path, monkeypatch):
+    """skillhub 子进程必须剥离代理环境变量（宿主代理会导致 CLI 网络静默失败）。"""
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+    captured = {}
+
+    class _P:
+        returncode = 0
+        stdout = "{}"
+        stderr = ""
+
+    def fake_run(args, *, capture_output, encoding, errors, timeout, env):
+        captured["env"] = env
+        assert encoding == "utf-8"
+        return _P()
+
+    monkeypatch.setattr(sc.subprocess, "run", fake_run)
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_skillhub_cli_path", lambda self: str(tmp_path / "fake.py"))
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_skillhub_python", lambda self: "C:/py/python.exe")
+    code, out, err = asyncio.run(p._run_skillhub(["search", "x"]))
+    assert code == 0
+    env = captured["env"]
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        assert key not in env
+
+
+def test_run_skillhub_no_python(tmp_path, monkeypatch):
+    """找不到 python 解释器时给出可操作提示。"""
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_skillhub_cli_path", lambda self: str(tmp_path / "fake.py"))
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_skillhub_python", lambda self: None)
+    with pytest.raises(RuntimeError, match="SKILLHUB_PYTHON"):
+        asyncio.run(p._run_skillhub(["search", "x"]))
+
+
+def test_skillhub_search_network_failure_reports_error(tmp_path, monkeypatch):
+    """CLI 网络失败（code=0 但 stderr 有警告）应报错而不是返回空结果。"""
+    target = tmp_path / "root"
+    target.mkdir()
+    p = _make_plugin(target)
+
+    async def fake_run(self, args, timeout=120):
+        return 0, "{\"query\":\"x\"}", "⚠️  community: search request failed"
+
+    monkeypatch.setattr(sc.SkillCompatPlugin, "_run_skillhub", fake_run)
+    result = _errx(asyncio.run(p.skillhub_search(query="x")))
+    assert "请求失败" in result["output"]
