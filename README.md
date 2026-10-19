@@ -40,15 +40,16 @@ https://market.project-neko.cn/#/plugin/105
 插件不会随 N.E.K.O 重启自动加载，需要开启一次。仓库 `scripts/` 提供自动开启脚本，登录 Windows 后自动把插件拉起（幂等，已就绪则跳过）：
 
 ```text
-scripts\autostart_skill_compat.ps1    # 主脚本：等待 N.E.K.O → POST start → 等待工具就绪
-scripts\autostart_skill_compat.bat    # 静默包装（启动文件夹用）
+scripts\autostart_skill_compat.ps1    # 主脚本：等待 N.E.K.O → POST start → 等待工具就绪（放数据目录）
+scripts\autostart_skill_compat.vbs    # 静默启动器（只放启动文件夹，无窗口无弹窗）
 ```
 
-一键注册（把两个文件复制到启动文件夹）：
+一键注册（**启动文件夹只放 vbs**，ps1 必须放 `%LOCALAPPDATA%\N.E.K.O\scripts\`，避免 ps1 被系统用编辑器打开弹窗）：
 
 ```powershell
-Copy-Item -Force scripts\autostart_skill_compat.bat "$([Environment]::GetFolderPath('Startup'))\"
-Copy-Item -Force scripts\autostart_skill_compat.ps1 "$([Environment]::GetFolderPath('Startup'))\"
+New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\N.E.K.O\scripts"
+Copy-Item -Force scripts\autostart_skill_compat.ps1 "$env:LOCALAPPDATA\N.E.K.O\scripts\"
+Copy-Item -Force scripts\autostart_skill_compat.vbs "$([Environment]::GetFolderPath('Startup'))\"
 ```
 
 日志写在 `%LOCALAPPDATA%\N.E.K.O\plugins\skill_compat\autostart.log`，退出码 0=成功 / 1=失败。
