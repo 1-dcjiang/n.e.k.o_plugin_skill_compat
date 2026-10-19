@@ -1,10 +1,10 @@
-﻿# ============================================================
+# ============================================================
 # autostart_skill_compat.ps1
 # 自动开启 skill_compat 插件（N.E.K.O 启动后自动 POST start 并等待工具就绪）
 # 特性：幂等（插件已就绪则直接退出）、TCP 端口探测 + 注册表轮询、日志、明确退出码
 # 用法：
 #   powershell -NoProfile -ExecutionPolicy Bypass -File autostart_skill_compat.ps1
-# 可放入 Windows 启动文件夹（配合 .bat 包装）实现 N.E.K.O 启动后自动开启。
+# 可放入 Windows 启动文件夹（配合 autostart_skill_compat.vbs 无窗口包装）实现 N.E.K.O 启动后自动开启，不弹任何窗口。
 # ============================================================
 param(
     [int]$TimeoutSec = 120,
