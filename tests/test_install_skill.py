@@ -8,8 +8,9 @@ import threading
 import zipfile
 from pathlib import Path
 
-import plugin.plugins.skill_compat as sc
 import pytest
+
+import plugin.plugins.skill_compat as sc
 from plugin.plugins.skill_compat import SkillCompatPlugin, _as_bool, _safe_name
 from plugin.sdk.plugin import Err, Ok
 
