@@ -10,9 +10,12 @@ from pathlib import Path
 
 import pytest
 
+# isort: off
+# ruff 0.12.x 与 0.16.x 对 mixed first/third-party 块排序判定相反，此处跳过排序
 import plugin.plugins.skill_compat as sc
 from plugin.plugins.skill_compat import SkillCompatPlugin, _as_bool, _safe_name
 from plugin.sdk.plugin import Err, Ok
+# isort: on
 
 
 def _make_plugin(target_root: Path) -> SkillCompatPlugin:
