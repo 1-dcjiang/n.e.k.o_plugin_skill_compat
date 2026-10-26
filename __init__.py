@@ -218,6 +218,18 @@ def _as_bool(v) -> bool:
     return bool(v)
 
 
+def _default_skill_dirs() -> list[str]:
+    """默认 skill 目录：本机 N.E.K.O 数据目录下的 skills（Windows/macOS/Linux 通用）。
+
+    修复：不再默认指向云端沙箱路径 /sandbox/workspace/skills（Windows 上不存在，
+    导致装 skill 时报"改成本机存在的可写目录"）。
+    """
+    base = os.path.expandvars(r"%LOCALAPPDATA%")
+    if not base or "%" in base or not os.path.isabs(base):
+        base = os.path.expanduser("~")
+    return [os.path.join(base, "N.E.K.O", "skills")]
+
+
 def _safe_name(s):
     """把任意来源字符串转成安全的目录名（去路径分隔符、..、控制字符、Windows 保留名）。"""
     s = (s or '').strip().replace('\\', '/').rstrip('/')
@@ -385,7 +397,7 @@ class SkillCompatPlugin(NekoPluginBase):
         super().__init__(ctx)
         self._idx: dict[str, dict] = {}   # path -> {path, dirname, name, description, kind, ...}
         self._lock = threading.Lock()
-        self._skill_dirs: list[str] = ["/sandbox/workspace/skills"]
+        self._skill_dirs: list[str] = _default_skill_dirs()
         self._follow_symlinks: bool = True
         self._scan_status: str = "未扫描"
         self._scanning: bool = False
@@ -407,6 +419,12 @@ class SkillCompatPlugin(NekoPluginBase):
             self._follow_symlinks = _as_bool(settings.get("follow_symlinks", True))
         except Exception:
             self.logger.warning("skill_compat: 读取配置失败，使用默认 skill_dirs")
+        # 确保默认/配置的 skill 目录存在（不存在则创建），避免"目录不可写"卡死安装
+        for d in list(self._skill_dirs):
+            try:
+                os.makedirs(d, exist_ok=True)
+            except OSError:
+                self.logger.warning(f"skill_compat: 无法创建 skill 目录 {d}，跳过")
         # 耗时扫描放后台，避免 10 秒超时；异常经 done_callback 落日志不静默丢失
         task = asyncio.create_task(self._scan_all())
         task.add_done_callback(self._on_scan_done)
