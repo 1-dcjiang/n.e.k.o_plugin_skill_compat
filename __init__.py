@@ -259,6 +259,22 @@ def _ip_is_safe(ip_str: str) -> bool:
                 or ip.is_reserved or ip.is_multicast)
 
 
+# GitHub 官方域白名单：本机加速器（Steam++/Watt 等）常把 github 系列域名
+# 在 hosts 里劫持到 127.0.0.1 做本地代理，若按解析 IP 判断会被误判为 SSRF。
+# 这些域名不可能是攻击者可控制的内网/云元数据端点，放行是安全的；
+# 其余域名仍走完整 SSRF 检查（含逐跳重定向校验）。
+_GITHUB_ALLOW_HOSTS = (
+    "github.com", "www.github.com",
+    "api.github.com", "codeload.github.com",
+    "raw.githubusercontent.com", "githubusercontent.com",
+    "gist.github.com", "github.io",
+)
+
+
+def _host_is_github(host: str) -> bool:
+    return any(host == g or host.endswith("." + g) for g in _GITHUB_ALLOW_HOSTS)
+
+
 def _url_safe(raw: str) -> bool:
     """URL 输入预筛选：拒绝明显危险形态（内网/回环/保留地址/云元数据）。
 
@@ -277,6 +293,9 @@ def _url_safe(raw: str) -> bool:
         return False
     if host in ("169.254.169.254", "100.100.100.200", "metadata.google.internal"):
         return False
+    # GitHub 官方域：加速器 hosts 劫持场景放行（代理流量仍走本机，见模块注释）
+    if _host_is_github(host):
+        return True
     # 解析 IP 再判（防 2130706433 / IPv6 简写 / @ 混淆 / IPv4-mapped IPv6）
     try:
         for info in socket.getaddrinfo(host, None):
@@ -315,7 +334,7 @@ def _download_url_with_redirects(url, max_bytes: int, confirm_large: bool = Fals
             else:
                 conn = http.client.HTTPConnection(host, port, timeout=60)
             conn.request("GET", path, headers={
-                "User-Agent": "N.E.K.O-skill_compat/0.1.21",
+                "User-Agent": "N.E.K.O-skill_compat/0.1.29",
                 "Connection": "close",
                 "Accept": "application/zip,application/octet-stream,*/*",
                 "Accept-Encoding": "identity",

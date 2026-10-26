@@ -4,6 +4,7 @@ import gzip
 import http.server
 import os
 import shutil
+import socket
 import threading
 import zipfile
 from pathlib import Path
@@ -430,6 +431,36 @@ def test_safe_url_rejects_private_targets(tmp_path):
 def test_safe_url_accepts_public_https(tmp_path):
     p = _make_plugin(tmp_path)
     assert p._is_safe_url("https://example.com/skill/archive/main.zip") is True
+
+
+def test_safe_url_accepts_github_under_hosts_hijack(tmp_path, monkeypatch):
+    """加速器把 github.com 劫持到 127.0.0.1 时，GitHub 官方域必须放行（白名单）。"""
+    p = _make_plugin(tmp_path)
+
+    # 模拟 hosts 劫持：github.com 解析到 127.0.0.1
+    def fake_getaddrinfo(host, *a, **k):
+        assert host in ("github.com", "codeload.github.com", "raw.githubusercontent.com")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))]
+
+    monkeypatch.setattr(sc.socket, "getaddrinfo", fake_getaddrinfo)
+    assert p._is_safe_url("https://github.com/Derpyu520/qq-bridge") is True
+    assert p._is_safe_url("https://codeload.github.com/owner/repo/zip/main") is True
+    assert p._is_safe_url("https://raw.githubusercontent.com/owner/repo/main/SKILL.md") is True
+
+
+def test_safe_url_non_github_still_rejected_when_hijacked(tmp_path, monkeypatch):
+    """非 GitHub 域被劫持到回环时仍必须拒绝（白名单不放宽 SSRF 防护）。"""
+    p = _make_plugin(tmp_path)
+
+    def fake_getaddrinfo(host, *a, **k):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))]
+
+    monkeypatch.setattr(sc.socket, "getaddrinfo", fake_getaddrinfo)
+    assert p._is_safe_url("https://example.com/evil.zip") is False
+    assert p._is_safe_url("https://evil-127.0.0.1.com/x") is False
+    # 白名单子域外推：githubusercontent.com 之外的伪造子域仍按常规检查
+    assert p._is_safe_url("https://github.com.evil.com/x") is False
+    assert p._is_safe_url("https://notgithub.com/x") is False
 
 
 def test_install_unsafe_url_rejected(tmp_path):
