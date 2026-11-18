@@ -50,7 +50,9 @@ _SKILLHUB_ITEM_RE = re.compile(r'^\s*(?:@([^\s/]+)/)?([^\s/]+)\s+(.+)$')
 # ---------- skill 安全审计规则（静态文本匹配，只读不执行） ----------
 # 每项: (rule_id, 级别, 标签, 正则, 提示, only_scripts)。
 # only_scripts=True 的规则只在脚本文件中生效（SKILL.md 说明文字跳过，避免误报）。
-_AUDIT_SCRIPT_EXTS = {'.py', '.sh', '.ps1', '.js', '.bat', '.cmd', '.rb', '.pl', '.lua'}
+_AUDIT_SCRIPT_EXTS = {'.py', '.sh', '.ps1', '.js', '.mjs', '.cjs', '.bat', '.cmd', '.rb', '.pl', '.lua'}
+# 依赖/缓存目录：其中的符号链接属正常安装产物，遍历时跳过（不视为包内容）
+_SKIP_DIRS = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', '.idea', '.vscode'}
 _AUDIT_MAX_SCRIPT_BYTES = 1_000_000
 _AUDIT_MAX_SCRIPTS = 100
 _AUDIT_MAX_FILES = 3000
@@ -130,12 +132,41 @@ def parse_frontmatter(text):
     if end is None:
         return {}
     fm = {}
+    # 顶层映射缩进：以首个非空、非注释行为准；顶层 name/description 整体缩进也能识别。
+    # metadata 这类纯键会切换当前顶层缩进，其下更深的同名 key 不再参与匹配。
+    cur_top = None
+    for i in range(1, end):
+        s = lines[i]
+        if not s.strip() or s.lstrip().startswith('#'):
+            continue
+        cur_top = len(s) - len(s.lstrip(' \t'))
+        break
+    if cur_top is None:
+        return {}
     idx = 1
     while idx < end:
-        # 仅匹配顶格 key，避免 metadata: 下缩进的 name 覆盖顶层 name
-        m = re.match(r'^(name|description)\s*:\s*(.*)$', lines[idx])
-        if not m:
+        line = lines[idx]
+        indent = len(line) - len(line.lstrip(' \t'))
+        stripped = line.strip()
+        if not stripped:
             idx += 1
+            continue
+        # 纯键（`key:`，无值）出现时不高于当前顶层，即视为当前顶层映射的键
+        if re.match(r'^[\w-]+\s*:\s*$', stripped) and indent <= cur_top:
+            cur_top = indent
+        if indent != cur_top:
+            idx += 1
+            continue
+        m = re.match(r'^(name|description)\s*:\s*(.*)$', stripped)
+        if not m:
+            # 其它顶层键（如 metadata）：跳过其整段缩进子块，避免同名字段覆盖
+            idx += 1
+            while idx < end:
+                s2 = lines[idx]
+                ind2 = len(s2) - len(s2.lstrip(' \t'))
+                if s2.strip() and ind2 <= cur_top:
+                    break
+                idx += 1
             continue
         key, val = m.group(1), m.group(2).strip()
         if val in ('>', '>-', '>+', '|', '|-', '|+'):
@@ -374,8 +405,12 @@ def _download_url_with_redirects(url, max_bytes, confirm_large=False):  # forge-
         resp = None
         last_err = None
         for ip in ips:  # 双栈回退：逐个已校验 IP 尝试，IPv4 优先
-            cand = (_PinnedHTTPSConnection(host, port, ip, 60) if p.scheme == "https"
-                    else _PinnedHTTPConnection(host, port, ip, 60))
+            remaining = _DL_DEADLINE_S - (time.monotonic() - start)
+            if remaining <= 0:
+                raise ValueError("下载整体超时，已拒绝")
+            sock_timeout = max(1.0, min(60.0, remaining))  # 每次尝试共享同一绝对截止时间
+            cand = (_PinnedHTTPSConnection(host, port, ip, sock_timeout) if p.scheme == "https"
+                    else _PinnedHTTPConnection(host, port, ip, sock_timeout))
             try:
                 cand.request("GET", path, headers={
                     "User-Agent": "skill-package-core/1.0",
@@ -419,15 +454,20 @@ def _download_url_with_redirects(url, max_bytes, confirm_large=False):  # forge-
             try:
                 buf = bytearray()
                 while True:
-                    if time.monotonic() - start > _DL_DEADLINE_S:
+                    remaining = _DL_DEADLINE_S - (time.monotonic() - start)
+                    if remaining <= 0:
                         raise ValueError("下载整体超时，已拒绝")
+                    try:  # 已阻塞的读也受剩余预算约束（urllib3/http.client 底层 socket）
+                        resp.fp.raw._sock.settimeout(max(0.1, remaining))
+                    except AttributeError:
+                        pass
                     chunk = resp.read(1 << 20)
                     if not chunk:
                         break
                     buf.extend(chunk)
                     if len(buf) > limit:
                         break
-                data = bytes(buf)
+                data = buf  # 直接返回 bytearray，避免 bytes(buf) 再复制一份整包
             except OSError as e:
                 raise ValueError(f"下载中断: {e}。下一步：重试或改用本地路径导入。")
             if len(data) > limit:
@@ -456,14 +496,18 @@ def _download_url_with_redirects(url, max_bytes, confirm_large=False):  # forge-
                                     f"下载内容 gzip 解压后超过默认上限 {max_bytes // (1024 * 1024)}MB",
                                     {"source": "downloaded-gzip"},  # forge-declared: SEC-4 理由=gzip 超限提示的来源元数据字段，非网络调用 出处=AUDIT.md#sec-declared 复审=2026-12-18
                                 )
-                        data = bytes(out)
+                        data = out  # 避免 bytes(out) 再复制一份
                 except _NeedConfirmation:
                     raise
                 except (OSError, EOFError, zlib.error):
                     raise ValueError("下载内容 gzip 解压失败。下一步：手动下载后提供本地路径。")
             return data
         finally:
-            conn.close()
+            try:  # 先关 resp：未读完的响应正文可能持有底层流，conn.close() 不一定释放
+                if resp is not None:
+                    resp.close()
+            finally:
+                conn.close()
     raise ValueError(f"重定向次数过多，已拒绝: {url}")
 
 
@@ -515,9 +559,19 @@ def audit_skill_dir(item):
     total_files = 0
     total_size = 0
     for root, dirs, files in os.walk(path):
-        dirs[:] = [d for d in dirs
-                   if d not in {'.git', '__pycache__', 'node_modules', '.venv', 'venv', '.idea', '.vscode'}
-                   and not os.path.islink(os.path.join(root, d))]
+        keep = []
+        for d in dirs:
+            full = os.path.join(root, d)
+            if d in _SKIP_DIRS:
+                continue
+            if os.path.islink(full):
+                # 目录链接：记入报告后跳过，不跟随（否则可能读包外文件且静默漏审）
+                issues.append({"rule": "symlink_skipped", "level": "medium", "label": "符号链接未审计",
+                               "where": os.path.relpath(full, path), "line": 0, "count": 1,
+                               "hint": "目录符号链接可能指向包外文件，未读取未审计"})
+                continue
+            keep.append(d)
+        dirs[:] = keep
         for fn in files:
             fp = os.path.join(root, fn)
             if os.path.islink(fp):
@@ -590,7 +644,11 @@ def find_skill_root(d, depth=0):
     if os.path.isfile(os.path.join(d, 'SKILL.md')):
         return d
     for sub in sorted(os.listdir(d)):
+        if sub in _SKIP_DIRS:
+            continue
         full = os.path.join(d, sub)
+        if os.path.islink(full):  # 不把目录链接当技能根（避免跟随到包外）
+            continue
         if os.path.isdir(full):
             r = find_skill_root(full, depth + 1)
             if r:
@@ -690,7 +748,11 @@ def stage_from_local(source, confirm_large=False):
         if os.path.isfile(os.path.join(source, 'SKILL.md')):
             return source, os.path.basename(source.rstrip('/\\')), None
         for d in sorted(os.listdir(source)):
+            if d in _SKIP_DIRS:
+                continue
             full = os.path.join(source, d)
+            if os.path.islink(full):  # 不接受目录链接作为技能根
+                continue
             if os.path.isdir(full) and os.path.isfile(os.path.join(full, 'SKILL.md')):
                 return full, d, None
         raise ValueError(f"目录里找不到 SKILL.md: {source}")
