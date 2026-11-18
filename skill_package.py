@@ -320,8 +320,8 @@ def _url_safe(raw):
         return False
     if host in ("169.254.169.254", "100.100.100.200", "metadata.google.internal"):
         return False
-    if _host_is_github(host):
-        return True
+    if p.scheme == "https" and _host_is_github(host):
+        return True  # 仅 HTTPS 白名单跳过 IP 预筛；HTTP 无证书兜底，进完整校验
     try:
         ipaddress.ip_address(host)
     except ValueError:
@@ -556,14 +556,16 @@ def audit_skill_dir(item):
     scripts = []
     total_files = 0
     total_size = 0
+    def _rel(p):
+        try:
+            return os.path.relpath(p, path)
+        except ValueError:  # Windows 跨盘（junction 指向另一盘）无法相对化
+            return str(p)
+
     def _walk_err(e):
         target = getattr(e, 'filename', '') or path
-        try:
-            where = os.path.relpath(target, path)
-        except ValueError:  # Windows 跨盘无法相对化
-            where = str(target)
         issues.append({"rule": "walk_error", "level": "medium", "label": "目录枚举失败未审计",
-                       "where": where, "line": 0, "count": 1,
+                       "where": _rel(target), "line": 0, "count": 1,
                        "hint": f"目录枚举失败，子目录未审计: {e}"})
 
     for root, dirs, files in os.walk(path, onerror=_walk_err):
@@ -575,7 +577,7 @@ def audit_skill_dir(item):
             if os.path.islink(full):
                 # 目录链接：记入报告后跳过，不跟随（否则可能读包外文件且静默漏审）
                 issues.append({"rule": "symlink_skipped", "level": "medium", "label": "符号链接未审计",
-                               "where": os.path.relpath(full, path), "line": 0, "count": 1,
+                               "where": _rel(full), "line": 0, "count": 1,
                                "hint": "目录符号链接可能指向包外文件，未读取未审计"})
                 continue
             keep.append(d)
@@ -584,7 +586,7 @@ def audit_skill_dir(item):
             fp = os.path.join(root, fn)
             if os.path.islink(fp):
                 issues.append({"rule": "symlink_skipped", "level": "medium", "label": "符号链接未审计",
-                               "where": os.path.relpath(fp, path), "line": 0, "count": 1,
+                               "where": _rel(fp), "line": 0, "count": 1,
                                "hint": "符号链接可能指向包外文件，未读取未审计"})
                 continue
             try:
@@ -592,7 +594,7 @@ def audit_skill_dir(item):
             except OSError as e:
                 total_files += 1  # 仍计入文件数，避免静默漏审
                 issues.append({"rule": "size_read_error", "level": "medium", "label": "文件大小读取失败未审计",
-                               "where": os.path.relpath(fp, path), "line": 0, "count": 1,
+                               "where": _rel(fp), "line": 0, "count": 1,
                                "hint": f"getsize 失败，未审计: {e}"})
                 continue
             total_files += 1
@@ -603,7 +605,7 @@ def audit_skill_dir(item):
                     scripts.append(fp)
                 else:
                     issues.append({"rule": "script_too_large", "level": "medium", "label": "脚本超限未审计",
-                                   "where": os.path.relpath(fp, path), "line": 0, "count": 1,
+                                   "where": _rel(fp), "line": 0, "count": 1,
                                    "hint": f"脚本 {size} 字节超过单文件上限 {_AUDIT_MAX_SCRIPT_BYTES}，未审计"})
             if total_files > _AUDIT_MAX_FILES:
                 break
