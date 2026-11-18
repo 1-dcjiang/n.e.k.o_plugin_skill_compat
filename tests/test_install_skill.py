@@ -368,7 +368,7 @@ def test_install_into_missing_root(tmp_path):
 # ---------- 超限 → 询问确认（而不是直接禁止） ----------
 
 def test_oversized_zip_asks_confirmation(tmp_path, monkeypatch):
-    monkeypatch.setattr(sc, "_MAX_PACKAGE_BYTES", 100)
+    monkeypatch.setattr(sc.skill_package, "_MAX_PACKAGE_BYTES", 100)
     zpath = tmp_path / "big.zip"
     with zipfile.ZipFile(zpath, "w") as zf:
         zf.writestr("big-skill/SKILL.md", "x" * 500)
@@ -386,7 +386,7 @@ def test_oversized_zip_asks_confirmation(tmp_path, monkeypatch):
 
 
 def test_oversized_zip_installs_after_confirmation(tmp_path, monkeypatch):
-    monkeypatch.setattr(sc, "_MAX_PACKAGE_BYTES", 100)
+    monkeypatch.setattr(sc.skill_package, "_MAX_PACKAGE_BYTES", 100)
     zpath = tmp_path / "big.zip"
     with zipfile.ZipFile(zpath, "w") as zf:
         zf.writestr("big-skill/SKILL.md", "x" * 500)
@@ -399,7 +399,7 @@ def test_oversized_zip_installs_after_confirmation(tmp_path, monkeypatch):
 
 
 def test_too_many_entries_asks_confirmation(tmp_path, monkeypatch):
-    monkeypatch.setattr(sc, "_MAX_ARCHIVE_ENTRIES", 3)
+    monkeypatch.setattr(sc.skill_package, "_MAX_ARCHIVE_ENTRIES", 3)
     zpath = tmp_path / "many.zip"
     with zipfile.ZipFile(zpath, "w") as zf:
         for i in range(4):
@@ -580,7 +580,7 @@ def test_download_gzip_decoded(tmp_path, monkeypatch):
     srv = http.server.HTTPServer(("127.0.0.1", 0), _GzipHandler)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
-    monkeypatch.setattr(sc, "_url_safe", lambda u: True)
+    monkeypatch.setattr(sc.skill_package, "_url_safe", lambda u: True)
     try:
         data = sc._download_url_with_redirects(
             f"http://localhost:{srv.server_port}/skill.zip", 1024, False)
@@ -684,7 +684,7 @@ def test_gzip_oversize_asks_confirmation(tmp_path, monkeypatch):
     srv = http.server.HTTPServer(("127.0.0.1", 0), _BigGzipHandler)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
-    monkeypatch.setattr(sc, "_url_safe", lambda u: True)
+    monkeypatch.setattr(sc.skill_package, "_url_safe", lambda u: True)
     try:
         with pytest.raises(sc._NeedConfirmation):
             sc._download_url_with_redirects(
