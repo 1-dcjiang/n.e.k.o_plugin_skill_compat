@@ -65,9 +65,6 @@ AUDIT_RULES = [
     ("node_exec", "critical", "Node 子进程执行",
      re.compile(r"(?:child_process['\"]\s*\)|\bcp|child_process)\.exec(?:File)?(?:Sync)?\(|\bexecSync\(|\bexecFileSync\("),  # forge-declared: SEC-3 理由=node_exec 检测规则正则字面量（child_process/cp/require 形态 exec*），非真实执行 出处=AUDIT.md#sec-declared 复审=2026-12-18
      "脚本通过 Node child_process 执行命令，运行时会执行任意命令", True),
-    ("js_member_exec", "critical", "JS 成员 exec 调用",
-     re.compile(r'\.exec(?:Sync|File)?\('),  # forge-declared: SEC-3 理由=js_member_exec 检测规则正则字面量（仅 .js/.mjs/.cjs 生效的成员 exec），非真实执行 出处=AUDIT.md#sec-declared 复审=2026-12-18
-     "JS 脚本通过对象成员 exec 执行命令（如 cp.exec），运行时会执行任意命令", True),
     ("download_exec", "critical", "下载内容并直接执行",  # forge-declared: SEC-4 理由=skill_package 为安全检测器规则字典/其攻击样本测试，非真实执行；下载为 SSRF 逐跳+超限确认的受控下载 出处=AUDIT.md#sec-declared 复审=2026-12-18
      re.compile(r'(?i)(curl|wget|iwr|Invoke-WebRequest|Invoke-RestMethod)\s+[^\r\n]{0,160}'  # forge-declared: SEC-4 理由=检测规则正则字面量本身 出处=AUDIT.md#sec-declared 复审=2026-12-18
                 r'\|\s*(ba|pw)?sh\b|'  # forge-declared: SEC-3 理由=检测规则正则字面量本身 出处=AUDIT.md#sec-declared 复审=2026-12-18
@@ -518,8 +515,6 @@ def audit_text(text, where):
     for rule_id, level, label, pat, hint, only_scripts in AUDIT_RULES:
         if only_scripts and where == 'SKILL.md':
             continue
-        if rule_id == 'js_member_exec' and not where.lower().endswith(('.js', '.mjs', '.cjs')):
-            continue  # 成员 exec 仅在 JS 文件判定，避免 .py 的 re/regex 误报
         first_line = 0
         count = 0
         for m in pat.finditer(text):
