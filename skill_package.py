@@ -119,12 +119,12 @@ def parse_frontmatter(text):
     if text.startswith('﻿'):
         text = text.lstrip('﻿')
     lines = text.split('\n')
-    if lines[0].rstrip('\r') != '---':
+    if lines[0].rstrip('\r').rstrip(' \t') != '---':
         return {}
     end = None
     for i in range(1, len(lines)):
-        # 结束分隔行必须顶格：块标量里缩进的 `---` 是内容，不能提前关闭 frontmatter
-        if lines[i].rstrip('\r') == '---':
+        # 结束分隔行必须顶格（允许尾随空格）：块标量里缩进的 `---` 是内容，不能提前关闭 frontmatter
+        if lines[i].rstrip('\r').rstrip(' \t') == '---':
             end = i
             break
     if end is None:
@@ -557,8 +557,13 @@ def audit_skill_dir(item):
     total_files = 0
     total_size = 0
     def _walk_err(e):
+        target = getattr(e, 'filename', '') or path
+        try:
+            where = os.path.relpath(target, path)
+        except ValueError:  # Windows 跨盘无法相对化
+            where = str(target)
         issues.append({"rule": "walk_error", "level": "medium", "label": "目录枚举失败未审计",
-                       "where": os.path.relpath(getattr(e, 'filename', '') or path, path), "line": 0, "count": 1,
+                       "where": where, "line": 0, "count": 1,
                        "hint": f"目录枚举失败，子目录未审计: {e}"})
 
     for root, dirs, files in os.walk(path, onerror=_walk_err):
@@ -674,9 +679,9 @@ def stage_zip(zip_path, confirm_large=False):
     try:
         with zipfile.ZipFile(zip_path) as zf:
             infos = zf.infolist()
-            total = sum(i.file_size for i in infos)
             if len(infos) > _HARD_MAX_ENTRIES:
                 raise ValueError(f"压缩包条目数 {len(infos)} 超过硬上限 {_HARD_MAX_ENTRIES}，已拒绝")
+            total = sum(i.file_size for i in infos)
             if not confirm_large:
                 if len(infos) > _MAX_ARCHIVE_ENTRIES:
                     raise _NeedConfirmation(
