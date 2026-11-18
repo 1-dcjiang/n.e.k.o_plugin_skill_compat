@@ -8,21 +8,14 @@
 - 索引以 path 为主键（name 可重复，不覆盖丢失）；按 name 查找时遍历索引
 """
 import asyncio
-import gzip
-import http.client
-import io
-import ipaddress
+import importlib.util as _importlib_util
 import json
 import os
-import re
 import shutil
-import socket
-import ssl
+import socket  # noqa: F401  # 测试 monkeypatch sc.socket.getaddrinfo 依赖
 import subprocess
-import tempfile
+import tempfile  # noqa: F401  # 测试 monkeypatch sc.tempfile.mkdtemp 依赖
 import threading
-import urllib.parse
-import zipfile
 
 from plugin.sdk.plugin import (
     Err,
@@ -35,9 +28,8 @@ from plugin.sdk.plugin import (
     plugin_entry,
     ui,
 )
-# ---------- skill 包安全/格式兼容纯模块（vendored，与 plugin-forge 同步） ----------
-import importlib.util as _importlib_util
 
+# ---------- skill 包安全/格式兼容纯模块（vendored，与 plugin-forge 同步） ----------
 _sp_spec = _importlib_util.spec_from_file_location(
     "skill_compat_skill_package",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "skill_package.py"))
