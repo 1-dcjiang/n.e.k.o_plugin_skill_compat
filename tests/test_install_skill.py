@@ -500,7 +500,7 @@ def test_redirect_to_private_rejected(tmp_path, monkeypatch):
     first = f"http://localhost:{srv.server_port}/src.zip"
     real = sc.skill_package._url_safe
     monkeypatch.setattr(sc.skill_package, "_url_safe", lambda u: u == first or real(u))
-    monkeypatch.setattr(sc.skill_package, "_resolve_safe_ip", lambda h, p: "127.0.0.1")
+    monkeypatch.setattr(sc.skill_package, "_resolve_safe_ips", lambda h, p: ["127.0.0.1"])
     try:
         with pytest.raises(ValueError, match="已拒绝"):
             sc._download_url_with_redirects(first, 1024, False)
@@ -584,7 +584,7 @@ def test_download_gzip_decoded(tmp_path, monkeypatch):
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     monkeypatch.setattr(sc.skill_package, "_url_safe", lambda u: True)
-    monkeypatch.setattr(sc.skill_package, "_resolve_safe_ip", lambda h, p: "127.0.0.1")
+    monkeypatch.setattr(sc.skill_package, "_resolve_safe_ips", lambda h, p: ["127.0.0.1"])
     try:
         data = sc._download_url_with_redirects(
             f"http://localhost:{srv.server_port}/skill.zip", 1024, False)
@@ -689,7 +689,7 @@ def test_gzip_oversize_asks_confirmation(tmp_path, monkeypatch):
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     monkeypatch.setattr(sc.skill_package, "_url_safe", lambda u: True)
-    monkeypatch.setattr(sc.skill_package, "_resolve_safe_ip", lambda h, p: "127.0.0.1")
+    monkeypatch.setattr(sc.skill_package, "_resolve_safe_ips", lambda h, p: ["127.0.0.1"])
     try:
         with pytest.raises(sc._NeedConfirmation):
             sc._download_url_with_redirects(

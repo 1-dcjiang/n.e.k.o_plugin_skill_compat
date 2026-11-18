@@ -25,6 +25,7 @@ import re
 import shutil
 import socket
 import tempfile
+import time
 import urllib.parse
 import zipfile
 import zlib
@@ -57,11 +58,14 @@ _AUDIT_MAX_TOTAL_BYTES = 60 * 1024 * 1024
 
 AUDIT_RULES = [
     ("exec_shell", "critical", "脚本直接执行系统命令",
-     re.compile(r'(?i)\b(os\.system|os\.popen|Popen|os\.exec|commands\.getoutput|Invoke-Expression|\bIEX\b|Start-Process)\b|(?<![\w.])(?:eval|exec)\s*\('),  # forge-declared: SEC-3 理由=exec_shell 检测规则正则字面量（裸 eval/exec 调用形状，(?<![\w.]) 排除成员调用），非真实执行 出处=AUDIT.md#sec-declared 复审=2026-12-18
+     re.compile(r'(?i)\b(os\.system|os\.popen|Popen|commands\.getoutput|Invoke-Expression|\bIEX\b|Start-Process)\b|(?<![\w.])(?:eval|exec)\s*\(|os\.(?:exec\w*|spawn\w*)\s*\('),  # forge-declared: SEC-3 理由=exec_shell 检测规则正则字面量（裸 eval/exec 与 os.exec*/spawn* 族，(?<![\w.]) 排除成员调用），非真实执行 出处=AUDIT.md#sec-declared 复审=2026-12-18
      "脚本包含直接执行系统命令/代码的调用，运行时会执行任意命令", False),
     ("node_exec", "critical", "Node 子进程执行",
-     re.compile(r'child_process\.exec\(|execSync\('),  # forge-declared: SEC-3 理由=node_exec 检测规则正则字面量（child_process.exec/execSync 形状），非真实执行 出处=AUDIT.md#sec-declared 复审=2026-12-18
+     re.compile(r"(?:child_process['\"]\s*\)|\bcp|child_process)\.exec(?:File)?(?:Sync)?\(|\bexecSync\(|\bexecFileSync\("),  # forge-declared: SEC-3 理由=node_exec 检测规则正则字面量（child_process/cp/require 形态 exec*），非真实执行 出处=AUDIT.md#sec-declared 复审=2026-12-18
      "脚本通过 Node child_process 执行命令，运行时会执行任意命令", True),
+    ("js_member_exec", "critical", "JS 成员 exec 调用",
+     re.compile(r'\.exec(?:Sync|File)?\('),  # forge-declared: SEC-3 理由=js_member_exec 检测规则正则字面量（仅 .js/.mjs/.cjs 生效的成员 exec），非真实执行 出处=AUDIT.md#sec-declared 复审=2026-12-18
+     "JS 脚本通过对象成员 exec 执行命令（如 cp.exec），运行时会执行任意命令", True),
     ("download_exec", "critical", "下载内容并直接执行",  # forge-declared: SEC-4 理由=skill_package 为安全检测器规则字典/其攻击样本测试，非真实执行；下载为 SSRF 逐跳+超限确认的受控下载 出处=AUDIT.md#sec-declared 复审=2026-12-18
      re.compile(r'(?i)(curl|wget|iwr|Invoke-WebRequest|Invoke-RestMethod)\s+[^\r\n]{0,160}'  # forge-declared: SEC-4 理由=检测规则正则字面量本身 出处=AUDIT.md#sec-declared 复审=2026-12-18
                 r'\|\s*(ba|pw)?sh\b|'  # forge-declared: SEC-3 理由=检测规则正则字面量本身 出处=AUDIT.md#sec-declared 复审=2026-12-18
@@ -226,7 +230,8 @@ def _parse_skillhub_search(text):
 
 # ---------- SSRF 预筛选与逐跳下载（钉 IP 防 rebinding） ----------
 _NAT64_NET = ipaddress.ip_network('64:ff9b::/96')
-_HARD_MAX_BYTES = 2 * 1024 * 1024 * 1024  # confirm_large=True 后仍保留的硬上限 2GB
+_HARD_MAX_BYTES = 512 * 1024 * 1024  # confirm_large=True 后仍保留的硬上限 512MB（控制内存峰值）
+_DL_DEADLINE_S = 300  # 单次下载整体 deadline（跨 hop/跨读块），非仅单次读写超时
 
 
 def _ip_is_safe(ip_str):
@@ -299,19 +304,28 @@ def _url_safe(raw):
     return _ip_is_safe(host)
 
 
-def _resolve_safe_ip(host, port):
-    """每跳只解析一次；全部 A/AAAA 结果须安全，返回首个安全 IP 供钉 IP 连接（防 rebinding）。"""
+def _resolve_safe_ips(host, port):
+    """每跳只解析一次；全部 A/AAAA 记录须安全，返回全部已校验 IP（IPv4 优先）供逐个回退连接。
+    GitHub 白名单域跳过 IP 判定：兼容 hosts 劫持到 127.0.0.1 的本地加速器（该域不可控内网）。
+    其余域名任一记录内网/保留即拒（防 rebinding / 混合 A 记录）。
+    """
     try:
         infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
-    except socket.gaierror as e:
+    except (socket.gaierror, UnicodeError) as e:
         raise ValueError(f"无法解析主机 {host}: {e}")
-    ips = sorted({i[4][0] for i in infos})
+    ips = sorted({i[4][0] for i in infos}, key=lambda s: (':' in s, s))
     if not ips:
         raise ValueError(f"无法解析主机 {host}")
-    for ip in ips:
-        if not _ip_is_safe(ip):
-            raise ValueError(f"下载目标不安全，已拒绝（解析到内网/保留地址）: {host} -> {ip}")
-    return ips[0]
+    if not _host_is_github(host):
+        for ip in ips:
+            if not _ip_is_safe(ip):
+                raise ValueError(f"下载目标不安全，已拒绝（解析到内网/保留地址）: {host} -> {ip}")
+    return ips
+
+
+def _resolve_safe_ip(host, port):
+    """兼容入口：返回首个已校验 IP（IPv4 优先）。"""
+    return _resolve_safe_ips(host, port)[0]
 
 
 class _PinnedHTTPConnection(http.client.HTTPConnection):
@@ -339,7 +353,10 @@ def _download_url_with_redirects(url, max_bytes, confirm_large=False):  # forge-
     """
     initial_scheme = urllib.parse.urlparse(url).scheme
     current = url
+    start = time.monotonic()
     for _ in range(6):
+        if time.monotonic() - start > _DL_DEADLINE_S:
+            raise ValueError("下载整体超时，已拒绝")
         try:
             p = urllib.parse.urlparse(current)
             host = p.hostname or ""
@@ -352,17 +369,31 @@ def _download_url_with_redirects(url, max_bytes, confirm_large=False):  # forge-
             raise ValueError(f"重定向降级 https→http，已拒绝: {current}")
         port = port or (443 if p.scheme == "https" else 80)
         path = (p.path or "/") + (("?" + p.query) if p.query else "")
-        ip = _resolve_safe_ip(host, port)
-        conn = (_PinnedHTTPSConnection(host, port, ip, 60) if p.scheme == "https"
-                else _PinnedHTTPConnection(host, port, ip, 60))
+        ips = _resolve_safe_ips(host, port)
+        conn = None
+        resp = None
+        last_err = None
+        for ip in ips:  # 双栈回退：逐个已校验 IP 尝试，IPv4 优先
+            cand = (_PinnedHTTPSConnection(host, port, ip, 60) if p.scheme == "https"
+                    else _PinnedHTTPConnection(host, port, ip, 60))
+            try:
+                cand.request("GET", path, headers={
+                    "User-Agent": "skill-package-core/1.0",
+                    "Connection": "close",
+                    "Accept": "application/zip,application/octet-stream,*/*",
+                    "Accept-Encoding": "identity",
+                })
+                resp = cand.getresponse()
+                conn = cand
+                break
+            except (OSError, http.client.HTTPException) as e:
+                last_err = e
+                cand.close()
+        if conn is None:
+            raise ValueError(
+                f"下载失败: {last_err}。下一步：若报证书校验失败，请改用本地路径/zip 导入，"
+                "或先手动下载再提供本地路径。")
         try:
-            conn.request("GET", path, headers={
-                "User-Agent": "skill-package-core/1.0",
-                "Connection": "close",
-                "Accept": "application/zip,application/octet-stream,*/*",
-                "Accept-Encoding": "identity",
-            })
-            resp = conn.getresponse()
             if 300 <= resp.status < 400:
                 loc = resp.getheader("Location")
                 if not loc:
@@ -380,18 +411,28 @@ def _download_url_with_redirects(url, max_bytes, confirm_large=False):  # forge-
                     cl_n = 0
                 if cl_n > limit:
                     if confirm_large:
-                        raise ValueError("下载超过硬上限 2GB，已拒绝")
+                        raise ValueError("下载超过硬上限 512MB，已拒绝")
                     raise _NeedConfirmation(
                         f"下载文件约 {round(cl_n / (1024 * 1024), 1)}MB，超过默认上限 {max_bytes // (1024 * 1024)}MB",
                         {"size_mb": round(cl_n / (1024 * 1024), 1), "source": "Content-Length"},
                     )
             try:
-                data = resp.read(limit + 1)
+                buf = bytearray()
+                while True:
+                    if time.monotonic() - start > _DL_DEADLINE_S:
+                        raise ValueError("下载整体超时，已拒绝")
+                    chunk = resp.read(1 << 20)
+                    if not chunk:
+                        break
+                    buf.extend(chunk)
+                    if len(buf) > limit:
+                        break
+                data = bytes(buf)
             except OSError as e:
                 raise ValueError(f"下载中断: {e}。下一步：重试或改用本地路径导入。")
             if len(data) > limit:
                 if confirm_large:
-                    raise ValueError("下载超过硬上限 2GB，已拒绝")
+                    raise ValueError("下载超过硬上限 512MB，已拒绝")
                 raise _NeedConfirmation(
                     f"下载内容约 {round(len(data) / (1024 * 1024), 1)}MB，超过默认上限 {max_bytes // (1024 * 1024)}MB",
                     {"size_mb": round(len(data) / (1024 * 1024), 1), "source": "downloaded"},  # forge-declared: SEC-4 理由=超限提示的来源元数据字段，非网络调用 出处=AUDIT.md#sec-declared 复审=2026-12-18
@@ -402,13 +443,15 @@ def _download_url_with_redirects(url, max_bytes, confirm_large=False):  # forge-
                     with gzip.GzipFile(fileobj=io.BytesIO(data)) as gf:
                         out = bytearray()
                         while True:
+                            if time.monotonic() - start > _DL_DEADLINE_S:
+                                raise ValueError("下载整体超时，已拒绝")
                             chunk = gf.read(1 << 20)
                             if not chunk:
                                 break
                             out.extend(chunk)
                             if len(out) > limit:
                                 if confirm_large:
-                                    raise ValueError("gzip 解压超过硬上限 2GB，已拒绝")
+                                    raise ValueError("gzip 解压超过硬上限 512MB，已拒绝")
                                 raise _NeedConfirmation(
                                     f"下载内容 gzip 解压后超过默认上限 {max_bytes // (1024 * 1024)}MB",
                                     {"source": "downloaded-gzip"},  # forge-declared: SEC-4 理由=gzip 超限提示的来源元数据字段，非网络调用 出处=AUDIT.md#sec-declared 复审=2026-12-18
@@ -431,6 +474,8 @@ def audit_text(text, where):
     for rule_id, level, label, pat, hint, only_scripts in AUDIT_RULES:
         if only_scripts and where == 'SKILL.md':
             continue
+        if rule_id == 'js_member_exec' and not where.lower().endswith(('.js', '.mjs', '.cjs')):
+            continue  # 成员 exec 仅在 JS 文件判定，避免 .py 的 re/regex 误报
         first_line = 0
         count = 0
         for m in pat.finditer(text):
@@ -599,7 +644,7 @@ def stage_zip(zip_path, confirm_large=False):
                         actual += len(chunk)
                         if actual > cap:
                             if confirm_large:
-                                raise ValueError("解压超过硬上限 2GB，已拒绝")
+                                raise ValueError("解压超过硬上限 512MB，已拒绝")
                             raise _NeedConfirmation(
                                 f"压缩包解压后实际占用约 {round(actual / (1024 * 1024), 1)}MB，超过默认上限 {_MAX_PACKAGE_BYTES // (1024 * 1024)}MB",
                                 {"size_mb": round(actual / (1024 * 1024), 1), "entries": len(infos)},
@@ -625,8 +670,12 @@ def stage_zip(zip_path, confirm_large=False):
 
 
 def _reject_symlinks(root):
-    """本地目录含符号链接一律拒绝（与 zip 侧"符号链接硬拒绝"口径一致，防读包外文件）。"""
+    """本地目录含符号链接一律拒绝（与 zip 侧"符号链接硬拒绝"口径一致，防读包外文件）。
+    跳过依赖/缓存目录（node_modules/.venv 等的 .bin 链接属正常安装产物）。
+    注：Py<3.12 的 Windows junction 不被 os.path.islink 识别，属已知平台局限。
+    """
     for dp, dns, fns in os.walk(root):
+        dns[:] = [d for d in dns if d not in {'.git', '__pycache__', 'node_modules', '.venv', 'venv'}]
         for n in dns + fns:
             if os.path.islink(os.path.join(dp, n)):
                 raise ValueError(f"本地目录含符号链接，已拒绝: {os.path.join(dp, n)}")
@@ -671,7 +720,7 @@ def stage_from_url(url, confirm_large=False):
             f.write(data)
         if fname.lower().endswith('.zip') or data[:2] == b'PK':
             return stage_zip(fpath, confirm_large)
-        raise ValueError("下载内容不是 .zip 压缩包。请提供 .zip 链接（如 GitHub 的 Download ZIP），或手动下载后提供本地路径。")  # forge-declared: SEC-4 理由=skill_package 为安全检测器规则字典/其攻击样本测试，非真实执行；下载为 SSRF 逐跳+超限确认的受控下载 出处=AUDIT.md#sec-declared 复审=2026-12-18
+        raise ValueError("下载内容不是 .zip 压缩包。请提供 .zip 链接（如 GitHub 的 Download ZIP），或手动下载后提供本地路径。")  # forge-declared: SEC-4 理由=报错提示文案含 Download 字样（引导用户手动下载），非网络调用 出处=AUDIT.md#sec-declared 复审=2026-12-18
     finally:
         # 无论成功/失败都清理保存 ZIP 的下载目录；stage_zip 返回的解压目录是另一个 tmp，保留给调用方
         shutil.rmtree(tmp, ignore_errors=True)

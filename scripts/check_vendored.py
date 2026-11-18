@@ -31,8 +31,13 @@ def main():
         with urllib.request.urlopen(m_url.group(1), timeout=30) as r:
             upstream = hashlib.sha256(r.read()).hexdigest()
     except OSError as e:
-        print(f"无法拉取上游（离线？）: {e}；本地与记录一致={local == expect}")
-        return 0 if local == expect else 1
+        # fail-closed：拉不到上游（离线/分支被删/404）默认判失败，避免静默失去漂移检测；
+        # 仅显式 --allow-offline 时才接受"本地与记录一致"作为离线兜底。
+        if "--allow-offline" in sys.argv and local == expect:
+            print(f"离线兜底（--allow-offline）: 无法拉取上游 {e}；本地与记录一致")
+            return 0
+        print(f"无法拉取上游（离线/分支被删？）: {e}；fail-closed 判失败")
+        return 1
     if upstream != local:
         print(f"漂移: local={local} upstream={upstream}")
         return 1
