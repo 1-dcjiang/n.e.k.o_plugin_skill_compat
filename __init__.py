@@ -55,6 +55,7 @@ _safe_name = skill_package._safe_name
 _ip_is_safe = skill_package._ip_is_safe
 _host_is_github = skill_package._host_is_github
 _url_safe = skill_package._url_safe
+_resolve_safe_ip = skill_package._resolve_safe_ip
 _download_url_with_redirects = skill_package._download_url_with_redirects
 _parse_skillhub_search = skill_package._parse_skillhub_search
 # 重导出标准库模块对象：测试 monkeypatch sc.socket / sc.tempfile 依赖（与纯模块共享同一对象）

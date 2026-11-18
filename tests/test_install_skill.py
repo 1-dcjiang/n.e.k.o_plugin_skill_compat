@@ -449,18 +449,16 @@ def test_safe_url_accepts_github_under_hosts_hijack(tmp_path, monkeypatch):
 
 
 def test_safe_url_non_github_still_rejected_when_hijacked(tmp_path, monkeypatch):
-    """非 GitHub 域被劫持到回环时仍必须拒绝（白名单不放宽 SSRF 防护）。"""
-    p = _make_plugin(tmp_path)
+    """非 GitHub 域被劫持到回环时，连接时单次解析校验仍必须拒绝（白名单不放宽 SSRF）。"""
+    import pytest
 
     def fake_getaddrinfo(host, *a, **k):
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 80))]
 
     monkeypatch.setattr(sc.socket, "getaddrinfo", fake_getaddrinfo)
-    assert p._is_safe_url("https://example.com/evil.zip") is False
-    assert p._is_safe_url("https://evil-127.0.0.1.com/x") is False
-    # 白名单子域外推：githubusercontent.com 之外的伪造子域仍按常规检查
-    assert p._is_safe_url("https://github.com.evil.com/x") is False
-    assert p._is_safe_url("https://notgithub.com/x") is False
+    for host in ("example.com", "evil-127.0.0.1.com", "github.com.evil.com", "notgithub.com"):
+        with pytest.raises(ValueError, match="已拒绝"):
+            sc._resolve_safe_ip(host, 443)
 
 
 def test_install_unsafe_url_rejected(tmp_path):
@@ -482,11 +480,13 @@ def test_ipv4_mapped_ipv6_rejected():
 
 
 def test_redirect_to_private_rejected(tmp_path, monkeypatch):
-    """重定向目标是内网时必须拒绝（防 302 跳内网 = SSRF）。"""
+    """重定向目标是内网时必须拒绝（防 302 跳内网 = SSRF），且首跳真经过服务器。"""
     import pytest
+    seen = []
 
     class _Redirector(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
+            seen.append(self.path)
             self.send_response(302)
             self.send_header("Location", "http://127.0.0.1:1/evil.zip")
             self.end_headers()
@@ -497,11 +497,14 @@ def test_redirect_to_private_rejected(tmp_path, monkeypatch):
     srv = http.server.HTTPServer(("127.0.0.1", 0), _Redirector)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
+    first = f"http://localhost:{srv.server_port}/src.zip"
+    real = sc.skill_package._url_safe
+    monkeypatch.setattr(sc.skill_package, "_url_safe", lambda u: u == first or real(u))
+    monkeypatch.setattr(sc.skill_package, "_resolve_safe_ip", lambda h, p: "127.0.0.1")
     try:
-        # 源 URL 形如公网（local 别名），放行；重定向到 127.0.0.1 需被拒
         with pytest.raises(ValueError, match="已拒绝"):
-            sc._download_url_with_redirects(
-                f"http://localhost:{srv.server_port}/src.zip", 1024, False)
+            sc._download_url_with_redirects(first, 1024, False)
+        assert seen == ["/src.zip"]
     finally:
         srv.shutdown()
         t.join()
@@ -581,6 +584,7 @@ def test_download_gzip_decoded(tmp_path, monkeypatch):
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     monkeypatch.setattr(sc.skill_package, "_url_safe", lambda u: True)
+    monkeypatch.setattr(sc.skill_package, "_resolve_safe_ip", lambda h, p: "127.0.0.1")
     try:
         data = sc._download_url_with_redirects(
             f"http://localhost:{srv.server_port}/skill.zip", 1024, False)
@@ -685,6 +689,7 @@ def test_gzip_oversize_asks_confirmation(tmp_path, monkeypatch):
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     monkeypatch.setattr(sc.skill_package, "_url_safe", lambda u: True)
+    monkeypatch.setattr(sc.skill_package, "_resolve_safe_ip", lambda h, p: "127.0.0.1")
     try:
         with pytest.raises(sc._NeedConfirmation):
             sc._download_url_with_redirects(
