@@ -118,12 +118,13 @@ def parse_frontmatter(text):
     """解析 SKILL.md 顶部 ---...--- YAML 头，返回 dict（缺则 {}）。兼容 UTF-8 BOM。"""
     if text.startswith('﻿'):
         text = text.lstrip('﻿')
-    if text.split('\n', 1)[0].strip() != '---':
-        return {}
     lines = text.split('\n')
+    if lines[0].rstrip('\r') != '---':
+        return {}
     end = None
     for i in range(1, len(lines)):
-        if lines[i].strip() == '---':
+        # 结束分隔行必须顶格：块标量里缩进的 `---` 是内容，不能提前关闭 frontmatter
+        if lines[i].rstrip('\r') == '---':
             end = i
             break
     if end is None:
@@ -259,6 +260,7 @@ def _parse_skillhub_search(text):
 # ---------- SSRF 预筛选与逐跳下载（钉 IP 防 rebinding） ----------
 _NAT64_NET = ipaddress.ip_network('64:ff9b::/96')
 _HARD_MAX_BYTES = 512 * 1024 * 1024  # confirm_large=True 后仍保留的硬上限 512MB（控制内存峰值）
+_HARD_MAX_ENTRIES = 50000  # confirm_large=True 后条目数硬上限，防空条目 inode 炸弹
 _DL_DEADLINE_S = 300  # 单次下载整体 deadline（跨 hop/跨读块），非仅单次读写超时
 
 
@@ -327,15 +329,15 @@ def _url_safe(raw):
             try:
                 return _ip_is_safe(str(ipaddress.IPv4Address(int(host))))
             except ValueError:
-                return True
+                return False  # 溢出/非法十进制主机名按不安全处理
         return True  # 域名：连接时 _resolve_safe_ip 单次解析校验
     return _ip_is_safe(host)
 
 
-def _resolve_safe_ips(host, port):
+def _resolve_safe_ips(host, port, trust_github=False):
     """每跳只解析一次；全部 A/AAAA 记录须安全，返回全部已校验 IP（IPv4 优先）供逐个回退连接。
-    GitHub 白名单域跳过 IP 判定：兼容 hosts 劫持到 127.0.0.1 的本地加速器（该域不可控内网）。
-    其余域名任一记录内网/保留即拒（防 rebinding / 混合 A 记录）。
+    仅当 trust_github=True（HTTPS + GitHub 白名单域）才跳过 IP 判定：兼容 hosts 劫持到 127.0.0.1 的
+    本地加速器。HTTP 明文无证书兜底，仍走完整 IP 校验。其余域名任一记录内网/保留即拒。
     """
     try:
         infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
@@ -344,16 +346,16 @@ def _resolve_safe_ips(host, port):
     ips = sorted({i[4][0] for i in infos}, key=lambda s: (':' in s, s))
     if not ips:
         raise ValueError(f"无法解析主机 {host}")
-    if not _host_is_github(host):
+    if not (trust_github and _host_is_github(host)):
         for ip in ips:
             if not _ip_is_safe(ip):
                 raise ValueError(f"下载目标不安全，已拒绝（解析到内网/保留地址）: {host} -> {ip}")
     return ips
 
 
-def _resolve_safe_ip(host, port):
+def _resolve_safe_ip(host, port, trust_github=False):
     """兼容入口：返回首个已校验 IP（IPv4 优先）。"""
-    return _resolve_safe_ips(host, port)[0]
+    return _resolve_safe_ips(host, port, trust_github)[0]
 
 
 class _PinnedHTTPConnection(http.client.HTTPConnection):
@@ -378,6 +380,7 @@ def _download_url_with_redirects(url, max_bytes, confirm_large=False):  # forge-
     - 最多 5 跳，防重定向死循环
     - 未确认超 max_bytes → _NeedConfirmation；确认后仍受 _HARD_MAX_BYTES 硬上限
     - TLS 走系统默认校验（不跳过证书）；连接用已校验 IP，防 DNS rebinding
+    - 返回 bytearray（避免整包 bytes 复制）；调用方写文件可直接 write，需 str 请自行 bytes(data).decode()
     """
     initial_scheme = urllib.parse.urlparse(url).scheme
     current = url
@@ -397,7 +400,7 @@ def _download_url_with_redirects(url, max_bytes, confirm_large=False):  # forge-
             raise ValueError(f"重定向降级 https→http，已拒绝: {current}")
         port = port or (443 if p.scheme == "https" else 80)
         path = (p.path or "/") + (("?" + p.query) if p.query else "")
-        ips = _resolve_safe_ips(host, port)
+        ips = _resolve_safe_ips(host, port, trust_github=(p.scheme == "https"))
         conn = None
         resp = None
         last_err = None
@@ -553,7 +556,12 @@ def audit_skill_dir(item):
     scripts = []
     total_files = 0
     total_size = 0
-    for root, dirs, files in os.walk(path):
+    def _walk_err(e):
+        issues.append({"rule": "walk_error", "level": "medium", "label": "目录枚举失败未审计",
+                       "where": os.path.relpath(getattr(e, 'filename', '') or path, path), "line": 0, "count": 1,
+                       "hint": f"目录枚举失败，子目录未审计: {e}"})
+
+    for root, dirs, files in os.walk(path, onerror=_walk_err):
         keep = []
         for d in dirs:
             full = os.path.join(root, d)
@@ -576,7 +584,11 @@ def audit_skill_dir(item):
                 continue
             try:
                 size = os.path.getsize(fp)
-            except OSError:
+            except OSError as e:
+                total_files += 1  # 仍计入文件数，避免静默漏审
+                issues.append({"rule": "size_read_error", "level": "medium", "label": "文件大小读取失败未审计",
+                               "where": os.path.relpath(fp, path), "line": 0, "count": 1,
+                               "hint": f"getsize 失败，未审计: {e}"})
                 continue
             total_files += 1
             total_size += size
@@ -663,6 +675,8 @@ def stage_zip(zip_path, confirm_large=False):
         with zipfile.ZipFile(zip_path) as zf:
             infos = zf.infolist()
             total = sum(i.file_size for i in infos)
+            if len(infos) > _HARD_MAX_ENTRIES:
+                raise ValueError(f"压缩包条目数 {len(infos)} 超过硬上限 {_HARD_MAX_ENTRIES}，已拒绝")
             if not confirm_large:
                 if len(infos) > _MAX_ARCHIVE_ENTRIES:
                     raise _NeedConfirmation(
@@ -678,7 +692,7 @@ def stage_zip(zip_path, confirm_large=False):
             actual = 0
             for i in infos:
                 n = i.filename.replace('\\', '/')
-                if n.startswith('/') or n.startswith('../') or '/../' in n or n.endswith('/..'):
+                if n == '..' or n.startswith('/') or n.startswith('../') or '/../' in n or n.endswith('/..'):
                     raise ValueError(f"zip 内含非法路径，已拒绝: {n}")
                 if re.match(r'^[a-zA-Z]:', n):
                     raise ValueError(f"zip 内含盘符路径条目，已拒绝: {n}")

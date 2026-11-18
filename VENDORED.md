@@ -9,6 +9,6 @@
 
 ## 当前 pinned 来源
 
-- upstream-commit: `23fe675a320edc337b41c1eeaf46ff5c28760646`
-- upstream-raw: `https://raw.githubusercontent.com/1-dcjiang/plugin-forge/23fe675a320edc337b41c1eeaf46ff5c28760646/skills/plugin-forge/scripts/skill_package.py`
-- sha256: `7D3CFE7C9217764FD78C54D44843A2EDA04F4078E3C11A3404F50AEDA07E3C2C`（LF 行尾，与上游 git blob 一致）
+- upstream-commit: `b915132e040cbb32a7bbb57d1702da2a9a1e76d0`
+- upstream-raw: `https://raw.githubusercontent.com/1-dcjiang/plugin-forge/b915132e040cbb32a7bbb57d1702da2a9a1e76d0/skills/plugin-forge/scripts/skill_package.py`
+- sha256: `1EC0E1B386A66B3E39E786BEAFEC197E090CBF926982AE7695AB6E2F4A7EEC52`（LF 行尾，与上游 git blob 一致）
