@@ -57,7 +57,7 @@ _AUDIT_MAX_TOTAL_BYTES = 60 * 1024 * 1024
 
 AUDIT_RULES = [
     ("exec_shell", "critical", "脚本直接执行系统命令",
-     re.compile(r'(?i)\b(os\.system|os\.popen|Popen|eval\s*\(|exec\s*\(|os\.exec|commands\.getoutput|Invoke-Expression|\bIEX\b|Start-Process)\b'),  # forge-declared: SEC-3 理由=skill_package 为安全检测器规则字典/其攻击样本测试，非真实执行；下载为 SSRF 逐跳+超限确认的受控下载 出处=AUDIT.md#sec-declared 复审=2026-12-18
+     re.compile(r'(?i)\b(os\.system|os\.popen|Popen|os\.exec|commands\.getoutput|Invoke-Expression|\bIEX\b|Start-Process)\b|\beval\s*\(|\bexec\s*\('),  # forge-declared: SEC-3 理由=skill_package 为安全检测器规则字典/其攻击样本测试，非真实执行；下载为 SSRF 逐跳+超限确认的受控下载 出处=AUDIT.md#sec-declared 复审=2026-12-18
      "脚本包含直接执行系统命令/代码的调用，运行时会执行任意命令", False),
     ("download_exec", "critical", "下载内容并直接执行",  # forge-declared: SEC-4 理由=skill_package 为安全检测器规则字典/其攻击样本测试，非真实执行；下载为 SSRF 逐跳+超限确认的受控下载 出处=AUDIT.md#sec-declared 复审=2026-12-18
      re.compile(r'(?i)(curl|wget|iwr|Invoke-WebRequest|Invoke-RestMethod)\s+[^\r\n]{0,160}'  # forge-declared: SEC-4 理由=检测规则正则字面量本身 出处=AUDIT.md#sec-declared 复审=2026-12-18
@@ -122,10 +122,26 @@ def parse_frontmatter(text):
     if end is None:
         return {}
     fm = {}
-    for ln in lines[1:end]:
-        m = re.match(r'^(name|description)\s*:\s*(.*)$', ln.strip())
-        if m:
-            fm[m.group(1)] = m.group(2).strip().strip('"\'')
+    idx = 1
+    while idx < end:
+        m = re.match(r'^(name|description)\s*:\s*(.*)$', lines[idx].strip())
+        if not m:
+            idx += 1
+            continue
+        key, val = m.group(1), m.group(2).strip()
+        if val in ('>', '>-', '>+', '|', '|-', '|+'):
+            # YAML 块标量：收集后续缩进行；折叠(>)用空格连接，字面(|)用换行连接
+            folded = val.startswith('>')
+            body = []
+            idx += 1
+            while idx < end and (lines[idx].startswith((' ', '\t')) or not lines[idx].strip()):
+                if lines[idx].strip():
+                    body.append(lines[idx].strip())
+                idx += 1
+            fm[key] = (' ' if folded else '\n').join(body)
+        else:
+            fm[key] = val.strip('"\'')
+            idx += 1
     return fm
 
 
@@ -356,13 +372,16 @@ def audit_text(text, where):
     for rule_id, level, label, pat, hint, only_scripts in AUDIT_RULES:
         if only_scripts and where == 'SKILL.md':
             continue
-        lines = []
+        first_line = 0
+        count = 0
         for m in pat.finditer(text):
-            lines.append(text.count('\n', 0, m.start()) + 1)
-        if lines:
+            if count == 0:
+                first_line = text.count('\n', 0, m.start()) + 1
+            count += 1
+        if count:
             hits.append({
                 "rule": rule_id, "level": level, "label": label,
-                "where": where, "line": lines[0], "count": len(lines), "hint": hint,
+                "where": where, "line": first_line, "count": count, "hint": hint,
             })
     return hits
 
@@ -375,6 +394,10 @@ def audit_skill_dir(item):
     try:
         with open(smd, encoding='utf-8', errors='replace') as f:
             content = f.read(2_000_000)
+        if len(content) >= 2_000_000:
+            issues.append({"rule": "skillmd_truncated", "level": "medium", "label": "SKILL.md 未完整读取",
+                           "where": "SKILL.md", "line": 0, "count": 1,
+                           "hint": "SKILL.md 超过 2MB 被截断，未读部分未审计"})
         issues += audit_text(content, 'SKILL.md')
     except FileNotFoundError:
         issues.append({"rule": "no_skill_md", "level": "high", "label": "缺少 SKILL.md",
@@ -397,20 +420,40 @@ def audit_skill_dir(item):
                 continue
             total_files += 1
             total_size += size
-            if os.path.splitext(fn)[1].lower() in _AUDIT_SCRIPT_EXTS and size <= _AUDIT_MAX_SCRIPT_BYTES:
-                scripts.append(fp)
+            ext = os.path.splitext(fn)[1].lower()
+            if ext in _AUDIT_SCRIPT_EXTS:
+                if size <= _AUDIT_MAX_SCRIPT_BYTES:
+                    scripts.append(fp)
+                else:
+                    issues.append({"rule": "script_too_large", "level": "medium", "label": "脚本超限未审计",
+                                   "where": os.path.relpath(fp, path), "line": 0, "count": 1,
+                                   "hint": f"脚本 {size} 字节超过单文件上限 {_AUDIT_MAX_SCRIPT_BYTES}，未审计"})
             if total_files > _AUDIT_MAX_FILES:
                 break
         if total_files > _AUDIT_MAX_FILES:
             break
+    if total_files > _AUDIT_MAX_FILES:
+        issues.append({"rule": "too_many_files", "level": "medium", "label": "文件数超限未全审",
+                       "where": "/", "line": 0, "count": 1,
+                       "hint": f"文件数超过 {_AUDIT_MAX_FILES}，超出部分未审计"})
+    if len(scripts) > _AUDIT_MAX_SCRIPTS:
+        issues.append({"rule": "too_many_scripts", "level": "medium", "label": "脚本数超限未全审",
+                       "where": "/", "line": 0, "count": 1,
+                       "hint": f"脚本数 {len(scripts)} 超过 {_AUDIT_MAX_SCRIPTS}，超出部分未审计"})
     for sp in scripts[:_AUDIT_MAX_SCRIPTS]:
+        rel = os.path.relpath(sp, path)
         try:
             with open(sp, encoding='utf-8', errors='replace') as f:
                 sc = f.read(500_000)
-            rel = os.path.relpath(sp, path)
+            if len(sc) >= 500_000:
+                issues.append({"rule": "script_truncated", "level": "medium", "label": "脚本未完整读取",
+                               "where": rel, "line": 0, "count": 1,
+                               "hint": "脚本超过 500KB 被截断，未读部分未审计"})
             issues += audit_text(sc, rel)
-        except Exception:
-            pass
+        except Exception as e:
+            issues.append({"rule": "script_read_error", "level": "medium", "label": "脚本读取失败",
+                           "where": rel, "line": 0, "count": 1,
+                           "hint": f"读取脚本失败: {e}"})
     if total_files > 1500 or total_size > _AUDIT_MAX_TOTAL_BYTES:
         issues.append({"rule": "huge_resource", "level": "low", "label": "资源规模偏大",
                        "where": "/", "line": 0, "count": 1,
@@ -540,9 +583,6 @@ def stage_from_url(url, confirm_large=False):
         if fname.lower().endswith('.zip') or data[:2] == b'PK':
             return stage_zip(fpath, confirm_large)
         raise ValueError("下载内容不是 .zip 压缩包。请提供 .zip 链接（如 GitHub 的 Download ZIP），或手动下载后提供本地路径。")  # forge-declared: SEC-4 理由=skill_package 为安全检测器规则字典/其攻击样本测试，非真实执行；下载为 SSRF 逐跳+超限确认的受控下载 出处=AUDIT.md#sec-declared 复审=2026-12-18
-    except _NeedConfirmation:
+    finally:
+        # 无论成功/失败都清理保存 ZIP 的下载目录；stage_zip 返回的解压目录是另一个 tmp，保留给调用方
         shutil.rmtree(tmp, ignore_errors=True)
-        raise
-    except Exception:
-        shutil.rmtree(tmp, ignore_errors=True)
-        raise
