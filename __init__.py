@@ -12,9 +12,7 @@ import importlib.util as _importlib_util
 import json
 import os
 import shutil
-import socket  # noqa: F401  # 测试 monkeypatch sc.socket.getaddrinfo 依赖
 import subprocess
-import tempfile  # noqa: F401  # 测试 monkeypatch sc.tempfile.mkdtemp 依赖
 import threading
 
 from plugin.sdk.plugin import (
@@ -59,6 +57,9 @@ _host_is_github = skill_package._host_is_github
 _url_safe = skill_package._url_safe
 _download_url_with_redirects = skill_package._download_url_with_redirects
 _parse_skillhub_search = skill_package._parse_skillhub_search
+# 重导出标准库模块对象：测试 monkeypatch sc.socket / sc.tempfile 依赖（与纯模块共享同一对象）
+socket = skill_package.socket
+tempfile = skill_package.tempfile
 
 
 
